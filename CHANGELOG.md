@@ -4,6 +4,19 @@ All notable changes to this project are documented in this file. The format
 follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this
 project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.0] - 2026-08-25
+
+里程碑 M4：Web UI 实时流投影、人机双向接管与多会话交互面板全量落地。
+
+### Added
+
+- **M4 Phase 1: 流式通信适配层与控制权协议**：新增 `StreamHub` 与 `TermFrame` 流式帧协议（`init` / `output` / `event` / `lock` / `exit`），支持 WebSocket/SSE 客户端实时订阅、输出环形缓冲重放，以及人机接管（Takeover / Release）双向锁管理；挂载 `ctx.interactiveShellStream` 服务。
+- **M4 Phase 2: Web 终端客户端适配器与 ANSI 虚拟缓冲区**：新增 `src/client.ts`（包含 `TermStreamClient`、`VirtualTerminalBuffer`、`stripAnsi` 以及 `TerminalRenderer` 接口），支持无缝对接 Xterm.js 实例渲染，维持状态机快照与历史回放，并支持双向指令/控制权派发。
+- **M4 Phase 3: 用户接管直通、锁冲突拦截与交还唤醒**：`StreamHub` 支持 `sendUserInput` 键盘输入直通底层 PTY；在 `user_takeover` 期间拦截 Agent 驱动 `send` 工具调用；用户交还控制权（`releaseLock` / `handback`）时自动携带用户操作备注与尾部输出向 Agent 注入上下文唤醒驱动回路。
+- **M4 Phase 4: Web UI 浮层交互面板与快捷动作中枢**：新增 `src/ui.ts`（包含 `DshShellPanelController`、`renderShellPanelCss` 与 `renderShellPanelHtml`），支持多会话 Tab 切换、折叠浮层 Dock、Takeover / Hand Back 切换、快捷键动作（Ctrl+C, Ctrl+D, Enter, Clear, Kill）以及状态徽章响应式渲染。
+- **现代化浅色主题与动态切换**：`DshShellPanelController` 支持 `theme` 属性（`'dark' | 'light'`）与 `toggleTheme()`，CSS 全面采用现代高对比 CSS 变量（高雅浅色/深色双配色调色板），Header 自带一键切换按钮（☀️/🌙）。
+- **M4 Phase 5: 端到端集成套件与完整文档**：新增 `test/e2e.test.mjs` 覆盖多方协同（Agent + 终端 PTY + 流式中枢 + 客户端 + 浮层面板 + 人机接管）全生命周期用例，完善 README 架构与接入指南。
+
 ## [0.1.1] - 2026-08-25
 
 闭环 Agent 唤醒与终端生命周期安全强化（P0 / P1 / P2 全量落地）。
@@ -12,10 +25,6 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 - **P0: 闭环 Agent 唤醒回路**：`dispatch-completed` 与 `monitor-triggered` 发生时，通过 `agent.followup(createUserMessage(...))` 主动向驱动模型注入 user-turn notice 消息，实现免轮询主动唤醒。
 - **P2: 文件变更监听支持**：`spawn` 与 `attach-monitor` 动作支持 `watch` 参数；挂载 `node:fs` 监听器，并在文件更新时触发 `monitor-triggered` 事件及 Agent 唤醒。
-- **M4 Phase 1: 流式通信适配层与控制权协议**：新增 `StreamHub` 与 `TermFrame` 流式帧协议（`init` / `output` / `event` / `lock` / `exit`），支持 WebSocket/SSE 客户端实时订阅、输出环形缓冲重放，以及人机接管（Takeover / Release）双向锁管理；挂载 `ctx.interactiveShellStream` 服务。
-- **M4 Phase 2: Web 终端客户端适配器与 ANSI 虚拟缓冲区**：新增 `src/client.ts`（包含 `TermStreamClient`、`VirtualTerminalBuffer`、`stripAnsi` 以及 `TerminalRenderer` 接口），支持无缝对接 Xterm.js 实例渲染，维持状态机快照与历史回放，并支持双向指令/控制权派发。
-- **M4 Phase 3: 用户接管直通、锁冲突拦截与交还唤醒**：`StreamHub` 支持 `sendUserInput` 键盘输入直通底层 PTY；在 `user_takeover` 期间拦截 Agent 驱动 `send` 工具调用；用户交还控制权（`releaseLock` / `handback`）时自动携带用户操作备注与尾部输出向 Agent 注入上下文唤醒驱动回路。
-- **M4 Phase 4: Web UI 浮层交互面板与快捷动作中枢**：新增 `src/ui.ts`（包含 `DshShellPanelController`、`renderShellPanelCss` 与 `renderShellPanelHtml`），支持多会话 Tab 切换、折叠浮层 Dock、Takeover / Hand Back 切换、快捷键动作（Ctrl+C, Ctrl+D, Enter, Clear, Kill）以及状态徽章响应式渲染。
 
 ### Fixed
 

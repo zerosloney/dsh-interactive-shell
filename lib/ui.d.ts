@@ -1,16 +1,21 @@
 /**
  * Web UI Overlay Panel & Interaction Controller for dsh-interactive-shell:
  * Provides multi-tab terminal session switching, takeover action bar,
- * quick action dispatchers (Ctrl+C, Ctrl+D, clear), and responsive panel rendering.
+ * quick action dispatchers (Ctrl+C, Ctrl+D, clear), theme switching (dark/light),
+ * and responsive panel rendering.
  *
  * @module
  */
 import type { ClientSessionState, TermStreamClient } from './client.js';
 /** Quick control actions available in the UI panel. */
 export type QuickActionKind = 'ctrl-c' | 'ctrl-d' | 'enter' | 'clear' | 'kill';
+/** Theme color schemes supported by the Web UI panel. */
+export type ThemeKind = 'dark' | 'light';
 export interface DshShellPanelOptions {
     /** Initial visibility state of the overlay panel (default: true). */
     initialOpen?: boolean;
+    /** Initial theme mode ('dark' | 'light', default: 'dark'). */
+    theme?: ThemeKind;
     /** Current human operator name for takeover requests (default: 'user'). */
     operatorName?: string;
     /** Callback when user invokes a quick action or command. */
@@ -25,6 +30,7 @@ export declare class DshShellPanelController {
     private readonly changeListeners;
     private activeId;
     private open;
+    private theme;
     private operator;
     private readonly onQuickAction?;
     constructor(options?: DshShellPanelOptions);
@@ -34,6 +40,12 @@ export declare class DshShellPanelController {
     setOpen(open: boolean): void;
     /** Toggle open state. */
     toggleOpen(): boolean;
+    /** Get current theme scheme. */
+    getTheme(): ThemeKind;
+    /** Set theme scheme. */
+    setTheme(theme: ThemeKind): void;
+    /** Toggle between dark and light themes. */
+    toggleTheme(): ThemeKind;
     /** Get active session ID. */
     getActiveSessionId(): string | null;
     /** Get active client instance. */
@@ -61,7 +73,7 @@ export declare class DshShellPanelController {
     dispose(): void;
 }
 /**
- * Render responsive CSS styling for the DSH Interactive Shell Overlay.
+ * Render responsive CSS styling for the DSH Interactive Shell Overlay (Dark & Modern Light themes).
  */
 export declare function renderShellPanelCss(): string;
 /**

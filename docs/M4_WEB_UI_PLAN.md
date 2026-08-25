@@ -2,7 +2,7 @@
 
 - **项目**：`dsh-interactive-shell`
 - **目标**：为 DeepSeek Harness (DSH) 提供面向 Web 界面侧的 **实时终端流式投影（Live Terminal Stream）** 与 **无缝人机接管（Human-in-the-Loop Takeover）** 能力。
-- **状态**：规划设计中
+- **状态**：**已全部落地交付（Phase 1 ~ Phase 5 全量完成，51/51 测试通过，覆盖率 94.81%）**
 
 ---
 

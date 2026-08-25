@@ -170,3 +170,29 @@ test('renderShellPanelHtml: renders empty and active states with takeover button
   panel.dispose()
   hub.dispose()
 })
+
+test('DshShellPanelController: supports light theme and theme switching', () => {
+  const panel = new DshShellPanelController({ theme: 'dark' })
+  assert.equal(panel.getTheme(), 'dark')
+
+  // Switch to light theme
+  assert.equal(panel.toggleTheme(), 'light')
+  assert.equal(panel.getTheme(), 'light')
+
+  const css = renderShellPanelCss()
+  assert.ok(css.includes('.dsh-shell-dock.theme-light'))
+  assert.ok(css.includes('--dsh-badge-running-bg: #dcfce7'))
+
+  const html = renderShellPanelHtml(panel)
+  assert.ok(html.includes('theme-light'))
+  assert.ok(html.includes('data-action="toggle-theme"'))
+
+  // Switch back to dark theme
+  panel.setTheme('dark')
+  assert.equal(panel.getTheme(), 'dark')
+  const darkHtml = renderShellPanelHtml(panel)
+  assert.ok(darkHtml.includes('theme-dark'))
+
+  panel.dispose()
+})
+

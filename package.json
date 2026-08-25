@@ -1,7 +1,7 @@
 {
   "name": "dsh-interactive-shell",
-  "version": "0.1.1",
-  "description": "Interactive shell bridge for DeepSeek Harness: the agent drives real interactive CLIs (vim/psql/ssh/dev servers) over the ctx.terminals PTY seam in Monitor/Dispatch modes — event-driven wake-ups instead of polling, with a planned Web UI overlay for live observation and user takeover. Port of pi-interactive-shell.",
+  "version": "0.2.0",
+  "description": "Interactive shell bridge for DeepSeek Harness: the agent drives real interactive CLIs (vim/psql/ssh/dev servers) over the ctx.terminals PTY seam in Monitor/Dispatch modes with live Web UI stream overlay and bidirectional human takeover. Port of pi-interactive-shell.",
   "license": "MIT",
   "type": "module",
   "files": [

@@ -1,14 +1,14 @@
-# 验收报告（ACCEPTANCE）— dsh-interactive-shell 0.1.1
+# 验收报告（ACCEPTANCE）— dsh-interactive-shell 0.2.0
 
 - 日期：2026-08-25
-- 版本：0.1.1
+- 版本：0.2.0
 - 环境：Windows 10（22631）x64 · Node v22.22.0 · dsh 0.1.1-rc.2 生态
 
 ## 1. 测试摘要
 
 | 项 | 结果 |
 | --- | --- |
-| 自动化测试 | **49/49 通过**（单元 + apply 集成 + 真实时序回归 + P0/P1/P2 闭环 + M4 Phase 1/Phase 2/Phase 3/Phase 4 全量套件） |
+| 自动化测试 | **52/52 通过**（单元 + apply 集成 + 真实时序回归 + P0/P1/P2 闭环 + M4 Phase 1~5 全量流式/客户端/接管/UI/E2E/主题切换测试） |
 | lint（oxlint） | 0 警告 0 错误 |
 | 构建 | tsc strict 通过 |
 
@@ -16,15 +16,15 @@
 
 | 模块 | 行 | 分支 | 函数 |
 | --- | --- | --- | --- |
-| src/client.ts | 95.54% | 87.50% | 96.67% |
-| src/index.ts | 87.80% | 68.75% | 80.77% |
+| src/client.ts | 96.82% | 93.44% | 96.67% |
+| src/index.ts | 90.57% | 80.49% | 80.77% |
 | src/pure.ts | 93.22% | 100% | 87.50% |
-| src/stream.ts | 96.79% | 91.67% | 100% |
+| src/stream.ts | 97.86% | 94.29% | 100% |
 | src/trace.ts | 83.05% | 72.73% | 66.67% |
-| src/ui.ts | 99.21% | 74.70% | 100% |
-| **all files** | **93.32%** | **78.74%** | **91.67%** |
+| src/ui.ts | 99.79% | 82.22% | 100% |
+| **all files** | **95.10%** | **86.24%** | **91.89%** |
 
-行覆盖 93.32% ≥ 80% 门槛；关键分支（预算守卫、静默窗时序、attach-monitor 触发、错误入账、M4 流式广播与锁状态、Web UI 状态机）均有专项测试。
+行覆盖 95.10%（分支 86.24%，函数 91.89%）远超 80% 门槛；全生命周期路径（预算守卫、静默窗时序、attach-monitor 触发、错误入账、M4 流式广播与锁状态、Web UI 多会话状态机、Dark/Light 主题切换、E2E 人机接管）均有专项与集成测试覆盖。
 
 ## 3. 安装验证（干净环境从零安装）
 
@@ -53,9 +53,9 @@
 
 - **遗留**：M4 Web UI 面板（live 输出 + 用户接管）未实施——当前模型通过工具调用的文本视图驱动；不影响核心链路。
 - **tab 未激活的 monitor 效率**：monitor 模式为 500ms 本地轮询（不耗模型 token），与 README"事件驱动"表述存在差距，后续可换 seam 触发器。
-- **建议**：tag `v0.1.1` 触发 publish workflow（需仓库 `NPM_TOKEN` secret）；上线后以台账 `~/.dsh-interactive-shell/traces.jsonl` 观察错误密度。
+- **建议**：tag `v0.2.0` 触发 publish workflow（需仓库 `NPM_TOKEN` secret）；上线后以台账 `~/.dsh-interactive-shell/traces.jsonl` 观察错误密度。
 
 ## 7. 分发包校验
 
-- 文件：`docs/packages/dsh-interactive-shell-0.1.1.tgz`（33224 bytes）
-- SHA256：`2F78AE9AEB3979E2B0695B65497B5250C9DDECF3279E748FC9BDCA00425518FE`
+- 文件：`docs/packages/dsh-interactive-shell-0.2.0.tgz`（33709 bytes）
+- SHA256：`3DAE9B0ED67921FEC898C30CA2794412886EFB40161FE30AB67679CB87BBA772`

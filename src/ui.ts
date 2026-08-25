@@ -1,7 +1,8 @@
 /**
  * Web UI Overlay Panel & Interaction Controller for dsh-interactive-shell:
  * Provides multi-tab terminal session switching, takeover action bar,
- * quick action dispatchers (Ctrl+C, Ctrl+D, clear), and responsive panel rendering.
+ * quick action dispatchers (Ctrl+C, Ctrl+D, clear), theme switching (dark/light),
+ * and responsive panel rendering.
  *
  * @module
  */
@@ -11,9 +12,14 @@ import type { ClientSessionState, TermStreamClient } from './client.js'
 /** Quick control actions available in the UI panel. */
 export type QuickActionKind = 'ctrl-c' | 'ctrl-d' | 'enter' | 'clear' | 'kill'
 
+/** Theme color schemes supported by the Web UI panel. */
+export type ThemeKind = 'dark' | 'light'
+
 export interface DshShellPanelOptions {
   /** Initial visibility state of the overlay panel (default: true). */
   initialOpen?: boolean
+  /** Initial theme mode ('dark' | 'light', default: 'dark'). */
+  theme?: ThemeKind
   /** Current human operator name for takeover requests (default: 'user'). */
   operatorName?: string
   /** Callback when user invokes a quick action or command. */
@@ -29,11 +35,13 @@ export class DshShellPanelController {
   private readonly changeListeners = new Set<() => void>()
   private activeId: string | null = null
   private open: boolean
+  private theme: ThemeKind
   private operator: string
   private readonly onQuickAction?: (sessionId: string, action: QuickActionKind) => void
 
   constructor(options: DshShellPanelOptions = {}) {
     this.open = options.initialOpen ?? true
+    this.theme = options.theme ?? 'dark'
     this.operator = options.operatorName ?? 'user'
     this.onQuickAction = options.onQuickAction
   }
@@ -54,6 +62,25 @@ export class DshShellPanelController {
   toggleOpen(): boolean {
     this.setOpen(!this.open)
     return this.open
+  }
+
+  /** Get current theme scheme. */
+  getTheme(): ThemeKind {
+    return this.theme
+  }
+
+  /** Set theme scheme. */
+  setTheme(theme: ThemeKind): void {
+    if (this.theme === theme) return
+    this.theme = theme
+    this.notify()
+  }
+
+  /** Toggle between dark and light themes. */
+  toggleTheme(): ThemeKind {
+    const nextTheme: ThemeKind = this.theme === 'dark' ? 'light' : 'dark'
+    this.setTheme(nextTheme)
+    return this.theme
   }
 
   /** Get active session ID. */
@@ -200,11 +227,37 @@ export class DshShellPanelController {
 }
 
 /**
- * Render responsive CSS styling for the DSH Interactive Shell Overlay.
+ * Render responsive CSS styling for the DSH Interactive Shell Overlay (Dark & Modern Light themes).
  */
 export function renderShellPanelCss(): string {
   return `
 .dsh-shell-dock {
+  --dsh-bg: #18181b;
+  --dsh-bg-header: #202024;
+  --dsh-bg-tabs: #141416;
+  --dsh-bg-viewport: #09090b;
+  --dsh-bg-actions: #18181b;
+  --dsh-text-primary: #f4f4f5;
+  --dsh-text-secondary: #a1a1aa;
+  --dsh-text-muted: #71717a;
+  --dsh-border: #27272a;
+  --dsh-tab-active-bg: #27272a;
+  --dsh-tab-active-border: #3f3f46;
+  --dsh-btn-bg: #27272a;
+  --dsh-btn-border: #3f3f46;
+  --dsh-btn-text: #f4f4f5;
+  --dsh-btn-hover: #3f3f46;
+  --dsh-shadow: 0 20px 35px -10px rgba(0, 0, 0, 0.6), 0 0 0 1px rgba(255, 255, 255, 0.05);
+
+  --dsh-badge-running-bg: #064e3b;
+  --dsh-badge-running-text: #34d399;
+  --dsh-badge-takeover-bg: #7c2d12;
+  --dsh-badge-takeover-text: #fb923c;
+  --dsh-badge-monitor-bg: #581c87;
+  --dsh-badge-monitor-text: #c084fc;
+  --dsh-badge-exited-bg: #3f3f46;
+  --dsh-badge-exited-text: #a1a1aa;
+
   position: fixed;
   bottom: 24px;
   right: 24px;
@@ -212,26 +265,55 @@ export function renderShellPanelCss(): string {
   max-width: calc(100vw - 48px);
   height: 440px;
   max-height: calc(100vh - 48px);
-  background: #18181b;
-  color: #f4f4f5;
+  background: var(--dsh-bg);
+  color: var(--dsh-text-primary);
   border-radius: 12px;
-  border: 1px solid #27272a;
-  box-shadow: 0 20px 35px -10px rgba(0, 0, 0, 0.6), 0 0 0 1px rgba(255, 255, 255, 0.05);
+  border: 1px solid var(--dsh-border);
+  box-shadow: var(--dsh-shadow);
   display: flex;
   flex-direction: column;
   overflow: hidden;
   font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
   z-index: 99999;
-  transition: transform 0.2s cubic-bezier(0.16, 1, 0.3, 1), opacity 0.2s ease;
+  transition: transform 0.2s cubic-bezier(0.16, 1, 0.3, 1), opacity 0.2s ease, background 0.2s ease, color 0.2s ease;
 }
+
+.dsh-shell-dock.theme-light {
+  --dsh-bg: #ffffff;
+  --dsh-bg-header: #f8fafc;
+  --dsh-bg-tabs: #f1f5f9;
+  --dsh-bg-viewport: #ffffff;
+  --dsh-bg-actions: #f8fafc;
+  --dsh-text-primary: #0f172a;
+  --dsh-text-secondary: #475569;
+  --dsh-text-muted: #94a3b8;
+  --dsh-border: #e2e8f0;
+  --dsh-tab-active-bg: #ffffff;
+  --dsh-tab-active-border: #cbd5e1;
+  --dsh-btn-bg: #ffffff;
+  --dsh-btn-border: #cbd5e1;
+  --dsh-btn-text: #1e293b;
+  --dsh-btn-hover: #f1f5f9;
+  --dsh-shadow: 0 20px 35px -10px rgba(0, 0, 0, 0.12), 0 0 0 1px rgba(0, 0, 0, 0.06);
+
+  --dsh-badge-running-bg: #dcfce7;
+  --dsh-badge-running-text: #15803d;
+  --dsh-badge-takeover-bg: #ffedd5;
+  --dsh-badge-takeover-text: #c2410c;
+  --dsh-badge-monitor-bg: #f3e8ff;
+  --dsh-badge-monitor-text: #7e22ce;
+  --dsh-badge-exited-bg: #f1f5f9;
+  --dsh-badge-exited-text: #64748b;
+}
+
 .dsh-shell-dock.is-collapsed {
   height: 42px;
 }
 .dsh-shell-header {
   height: 42px;
   padding: 0 14px;
-  background: #202024;
-  border-bottom: 1px solid #27272a;
+  background: var(--dsh-bg-header);
+  border-bottom: 1px solid var(--dsh-border);
   display: flex;
   align-items: center;
   justify-content: space-between;
@@ -240,7 +322,7 @@ export function renderShellPanelCss(): string {
 .dsh-shell-title {
   font-size: 13px;
   font-weight: 600;
-  color: #e4e4e7;
+  color: var(--dsh-text-primary);
   display: flex;
   align-items: center;
   gap: 8px;
@@ -252,18 +334,18 @@ export function renderShellPanelCss(): string {
   font-weight: 500;
   text-transform: uppercase;
 }
-.dsh-badge-running { background: #064e3b; color: #34d399; }
-.dsh-badge-takeover { background: #7c2d12; color: #fb923c; }
-.dsh-badge-monitor { background: #581c87; color: #c084fc; }
-.dsh-badge-exited { background: #3f3f46; color: #a1a1aa; }
+.dsh-badge-running { background: var(--dsh-badge-running-bg); color: var(--dsh-badge-running-text); }
+.dsh-badge-takeover { background: var(--dsh-badge-takeover-bg); color: var(--dsh-badge-takeover-text); }
+.dsh-badge-monitor { background: var(--dsh-badge-monitor-bg); color: var(--dsh-badge-monitor-text); }
+.dsh-badge-exited { background: var(--dsh-badge-exited-bg); color: var(--dsh-badge-exited-text); }
 
 .dsh-shell-tabs {
   display: flex;
   align-items: center;
   gap: 4px;
-  background: #141416;
+  background: var(--dsh-bg-tabs);
   padding: 4px 8px;
-  border-bottom: 1px solid #27272a;
+  border-bottom: 1px solid var(--dsh-border);
   overflow-x: auto;
 }
 .dsh-shell-tab {
@@ -271,7 +353,7 @@ export function renderShellPanelCss(): string {
   font-size: 12px;
   border-radius: 6px;
   background: transparent;
-  color: #a1a1aa;
+  color: var(--dsh-text-secondary);
   cursor: pointer;
   border: 1px solid transparent;
   display: flex;
@@ -279,25 +361,27 @@ export function renderShellPanelCss(): string {
   gap: 6px;
 }
 .dsh-shell-tab.is-active {
-  background: #27272a;
-  color: #fafafa;
-  border-color: #3f3f46;
+  background: var(--dsh-tab-active-bg);
+  color: var(--dsh-text-primary);
+  border-color: var(--dsh-tab-active-border);
+  font-weight: 500;
 }
 .dsh-shell-viewport {
   flex: 1;
   padding: 10px 14px;
-  background: #09090b;
+  background: var(--dsh-bg-viewport);
   overflow-y: auto;
   font-size: 12px;
   line-height: 1.5;
   white-space: pre-wrap;
   word-break: break-all;
+  color: var(--dsh-text-primary);
 }
 .dsh-shell-actions {
   height: 44px;
   padding: 0 12px;
-  background: #18181b;
-  border-top: 1px solid #27272a;
+  background: var(--dsh-bg-actions);
+  border-top: 1px solid var(--dsh-border);
   display: flex;
   align-items: center;
   justify-content: space-between;
@@ -307,16 +391,21 @@ export function renderShellPanelCss(): string {
   padding: 4px 10px;
   font-size: 12px;
   border-radius: 6px;
-  border: 1px solid #3f3f46;
-  background: #27272a;
-  color: #f4f4f5;
+  border: 1px solid var(--dsh-btn-border);
+  background: var(--dsh-btn-bg);
+  color: var(--dsh-btn-text);
   cursor: pointer;
   display: inline-flex;
   align-items: center;
   gap: 4px;
+  transition: background 0.15s ease, border-color 0.15s ease;
 }
 .dsh-btn:hover {
-  background: #3f3f46;
+  background: var(--dsh-btn-hover);
+}
+.dsh-btn-icon {
+  padding: 4px 8px;
+  font-size: 12px;
 }
 .dsh-btn-takeover {
   background: #ea580c;
@@ -332,6 +421,9 @@ export function renderShellPanelCss(): string {
   border-color: #10b981;
   color: #ffffff;
 }
+.dsh-btn-release:hover {
+  background: #047857;
+}
 `
 }
 
@@ -340,24 +432,28 @@ export function renderShellPanelCss(): string {
  */
 export function renderShellPanelHtml(controller: DshShellPanelController): string {
   const open = controller.isOpen()
+  const theme = controller.getTheme()
   const states = controller.getSessionStates()
   const activeId = controller.getActiveSessionId()
   const activeClient = controller.getActiveClient()
   const activeState = activeClient?.getState()
+  const themeClass = theme === 'light' ? 'theme-light' : 'theme-dark'
+  const themeIcon = theme === 'dark' ? '☀️' : '🌙'
 
   if (states.length === 0) {
     return `
-<div class="dsh-shell-dock ${open ? '' : 'is-collapsed'}">
+<div class="dsh-shell-dock ${themeClass} ${open ? '' : 'is-collapsed'}">
   <div class="dsh-shell-header">
     <div class="dsh-shell-title">
       <span>🐚 DSH Interactive Shell</span>
       <span class="dsh-shell-badge dsh-badge-exited">idle</span>
     </div>
-    <div class="dsh-shell-controls">
+    <div class="dsh-shell-controls" style="display: flex; gap: 4px; align-items: center;">
+      <button class="dsh-btn dsh-btn-icon" data-action="toggle-theme" title="Switch Theme">${themeIcon}</button>
       <button class="dsh-btn" data-action="toggle-open">${open ? '−' : '+'}</button>
     </div>
   </div>
-  ${open ? '<div class="dsh-shell-viewport"><div style="color: #71717a; text-align: center; padding: 40px 0;">No active interactive shell sessions.</div></div>' : ''}
+  ${open ? '<div class="dsh-shell-viewport"><div style="color: var(--dsh-text-muted); text-align: center; padding: 40px 0;">No active interactive shell sessions.</div></div>' : ''}
 </div>`
   }
 
@@ -388,13 +484,14 @@ export function renderShellPanelHtml(controller: DshShellPanelController): strin
   const bufferText = activeClient?.getBuffer().getText() ?? ''
 
   return `
-<div class="dsh-shell-dock ${open ? '' : 'is-collapsed'}">
+<div class="dsh-shell-dock ${themeClass} ${open ? '' : 'is-collapsed'}">
   <div class="dsh-shell-header">
     <div class="dsh-shell-title">
       <span>🐚 DSH Shell</span>
       <span class="dsh-shell-badge ${badgeClass}">${badgeText}</span>
     </div>
-    <div class="dsh-shell-controls">
+    <div class="dsh-shell-controls" style="display: flex; gap: 4px; align-items: center;">
+      <button class="dsh-btn dsh-btn-icon" data-action="toggle-theme" title="Switch Theme">${themeIcon}</button>
       <button class="dsh-btn" data-action="toggle-open">${open ? '−' : '+'}</button>
     </div>
   </div>
@@ -404,7 +501,7 @@ export function renderShellPanelHtml(controller: DshShellPanelController): strin
   <div class="dsh-shell-tabs">
     ${tabsHtml}
   </div>
-  <div class="dsh-shell-viewport" id="dsh-term-viewport">${bufferText || '<span style="color: #52525b;">Waiting for output...</span>'}</div>
+  <div class="dsh-shell-viewport" id="dsh-term-viewport">${bufferText || '<span style="color: var(--dsh-text-muted);">Waiting for output...</span>'}</div>
   <div class="dsh-shell-actions">
     <div style="display: flex; gap: 6px;">
       ${
