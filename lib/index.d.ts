@@ -5,6 +5,7 @@ import { StreamHub } from './stream.js';
 import type { TermFrame } from './stream.js';
 export * from './stream.js';
 export * from './client.js';
+export * from './ui.js';
 /** Cordis plugin name used by loader diagnostics. */
 export declare const name = "interactive-shell";
 /**

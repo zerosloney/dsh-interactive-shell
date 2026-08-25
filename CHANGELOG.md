@@ -13,6 +13,8 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - **P0: 闭环 Agent 唤醒回路**：`dispatch-completed` 与 `monitor-triggered` 发生时，通过 `agent.followup(createUserMessage(...))` 主动向驱动模型注入 user-turn notice 消息，实现免轮询主动唤醒。
 - **P2: 文件变更监听支持**：`spawn` 与 `attach-monitor` 动作支持 `watch` 参数；挂载 `node:fs` 监听器，并在文件更新时触发 `monitor-triggered` 事件及 Agent 唤醒。
 - **M4 Phase 1: 流式通信适配层与控制权协议**：新增 `StreamHub` 与 `TermFrame` 流式帧协议（`init` / `output` / `event` / `lock` / `exit`），支持 WebSocket/SSE 客户端实时订阅、输出环形缓冲重放，以及人机接管（Takeover / Release）双向锁管理；挂载 `ctx.interactiveShellStream` 服务。
+- **M4 Phase 2: Web 终端客户端适配器与 ANSI 虚拟缓冲区**：新增 `src/client.ts`（包含 `TermStreamClient`、`VirtualTerminalBuffer`、`stripAnsi` 以及 `TerminalRenderer` 接口），支持无缝对接 Xterm.js 实例渲染，维持状态机快照与历史回放，并支持双向指令/控制权派发。
+- **M4 Phase 3: 用户接管直通、锁冲突拦截与交还唤醒**：`StreamHub` 支持 `sendUserInput` 键盘输入直通底层 PTY；在 `user_takeover` 期间拦截 Agent 驱动 `send` 工具调用；用户交还控制权（`releaseLock` / `handback`）时自动携带用户操作备注与尾部输出向 Agent 注入上下文唤醒驱动回路。
 
 ### Fixed
 

@@ -353,3 +353,80 @@ test('M4 Phase 1: 控制权锁变更时广播 lock 帧与 lock-changed 事件', 
   stop()
 })
 
+// ---------- M4 Phase 3: 双向交互与接管协议测试 ----------
+
+test('M4 Phase 3: 用户接管状态下 sendUserInput 直通 PTY 写入', async () => {
+  const { ctx, registered, stop, terminals } = makeCtx()
+  const tool = registered[0]
+  const exec = { signal: new AbortController().signal, agent: { id: 'agent-1' } }
+
+  const spawned = await tool.execute({ action: 'spawn', command: 'psql', mode: 'interactive' }, exec)
+  const streamHub = ctx.interactiveShellStream
+  assert.ok(streamHub)
+
+  // 用户接管
+  streamHub.acquireLock(spawned.sessionId, 'alice')
+
+  // 用户直接通过 streamHub 敲击键盘/发送输入
+  terminals.setOutput('psql (16.0)\npostgres=> ')
+  const viewport = await streamHub.sendUserInput(spawned.sessionId, 'SELECT 1;\n')
+  assert.ok(viewport !== undefined)
+
+  stop()
+})
+
+test('M4 Phase 3: 用户接管时拦截 Agent send 工具调用并明确报错', async () => {
+  const { ctx, registered, stop } = makeCtx()
+  const tool = registered[0]
+  const exec = { signal: new AbortController().signal, agent: { id: 'agent-1' } }
+
+  const spawned = await tool.execute({ action: 'spawn', command: 'vim config.yml', mode: 'interactive' }, exec)
+  const streamHub = ctx.interactiveShellStream
+  assert.ok(streamHub)
+
+  // 用户接管
+  streamHub.acquireLock(spawned.sessionId, 'bob')
+
+  // Agent 试图 send 时被拦截
+  await assert.rejects(
+    () => tool.execute({ action: 'send', sessionId: spawned.sessionId, input: ':wq\n' }, exec),
+    /locked by user takeover \(bob\)/,
+  )
+
+  // 用户交还控制权后 Agent 恢复可用
+  streamHub.releaseLock(spawned.sessionId)
+  const sent = await tool.execute({ action: 'send', sessionId: spawned.sessionId, input: ':wq\n' }, exec)
+  assert.ok(sent)
+
+  stop()
+})
+
+test('M4 Phase 3: 交还控制权 (handback / releaseLock) 自动唤醒 Agent 并注入上下文通知', async () => {
+  const { ctx, registered, stop } = makeCtx()
+  const tool = registered[0]
+  const wokeMessages = []
+  const agent = {
+    id: 'agent-1',
+    followup: (msg) => wokeMessages.push(msg),
+  }
+  const exec = { signal: new AbortController().signal, agent }
+
+  const spawned = await tool.execute({ action: 'spawn', command: 'htop', mode: 'interactive' }, exec)
+  const streamHub = ctx.interactiveShellStream
+  assert.ok(streamHub)
+
+  // 用户接管
+  streamHub.acquireLock(spawned.sessionId, 'alice')
+
+  // 用户交还控制权并附带操作备注
+  streamHub.handback(spawned.sessionId, '已杀死占用 99% CPU 的死循环进程 PID 4321')
+
+  assert.equal(wokeMessages.length, 1)
+  assert.equal(wokeMessages[0].source.form, 'notice')
+  assert.match(wokeMessages[0].source.summary, /User released control of shell session/)
+  assert.match(wokeMessages[0].content[0].text, /已杀死占用 99% CPU 的死循环进程 PID 4321/)
+
+  stop()
+})
+
+

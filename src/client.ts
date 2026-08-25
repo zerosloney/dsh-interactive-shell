@@ -38,14 +38,12 @@ export interface TerminalRenderer {
 }
 
 /** ANSI Escape Sequence Regular Expression for text stripping. */
-const ESC_CHAR = '\\u001B'
-const CSI_CHAR = '\\u009B'
-const ANSI_PATTERN =
-  '[' +
-  ESC_CHAR +
-  CSI_CHAR +
-  '][\\]()#;?]*(?:(?:(?:(?:;[-a-zA-Z\\d\\/#&.:=?%_~_]+)*|[a-zA-Z\\d]+(?:;[-a-zA-Z\\d\\/#&.:=?%_~_]*)*)?\\u0007)|(?:(?:\\d{1,4}(?:;\\d{0,4})*)?[\\dA-PR-TZcf-ntqry=><~]))'
-const ANSI_REGEX = new RegExp(ANSI_PATTERN, 'g')
+// oxlint-disable no-control-regex
+// eslint-disable-next-line no-control-regex
+const ANSI_REGEX = new RegExp(
+  '[\u001B\u009B][[\\]()#;?]*(?:(?:(?:(?:;[-a-zA-Z\\d\\/#&.:=?%_~_]+)*|[a-zA-Z\\d]+(?:;[-a-zA-Z\\d\\/#&.:=?%_~_]*)*)?\\u0007)|(?:(?:\\d{1,4}(?:;\\d{0,4})*)?[\\dA-PR-TZcf-ntqry=><~]))',
+  'g',
+)
 
 /** Strip ANSI color/control codes from a string for plain-text extraction. */
 export function stripAnsi(text: string): string {
@@ -119,6 +117,10 @@ export class VirtualTerminalBuffer {
 }
 
 export interface TermStreamClientOptions {
+  /** Initial command name if known prior to stream init frame. */
+  initialCommand?: string
+  /** Initial mode if known prior to stream init frame. */
+  initialMode?: 'interactive' | 'hands-free' | 'dispatch' | 'monitor'
   /** Maximum scrollback lines in the virtual buffer (default: 1000). */
   maxScrollback?: number
   /** Callback invoked when input should be sent to backend PTY (during user takeover). */
@@ -138,8 +140,8 @@ export class TermStreamClient {
   private readonly renderers = new Set<TerminalRenderer>()
   private readonly stateListeners = new Set<(state: Readonly<ClientSessionState>) => void>()
   private readonly outputListeners = new Set<(chunk: string) => void>()
-  private readonly onSendInput?: (sessionId: string, input: string) => void
-  private readonly onLockRequest?: (sessionId: string, action: 'acquire' | 'release', user?: string) => void
+  onSendInput?: (sessionId: string, input: string) => void
+  onLockRequest?: (sessionId: string, action: 'acquire' | 'release', user?: string) => void
   private streamDisposer?: () => void
 
   constructor(sessionId: string, options: TermStreamClientOptions = {}) {
@@ -149,8 +151,8 @@ export class TermStreamClient {
     this.onLockRequest = options.onLockRequest
     this.state = {
       sessionId,
-      command: '',
-      mode: 'interactive',
+      command: options.initialCommand ?? '',
+      mode: options.initialMode ?? 'interactive',
       status: 'starting',
       exitCode: null,
       lockState: 'agent_driving',
@@ -345,6 +347,13 @@ export class TermStreamClient {
   connectHub(hub: StreamHub, replay = true): () => void {
     this.streamDisposer?.()
     const unsub = hub.subscribe(this.sessionId, (frame) => this.handleFrame(frame), replay)
+    this.onLockRequest = (sessionId, action, user) => {
+      if (action === 'acquire') hub.acquireLock(sessionId, user)
+      else hub.releaseLock(sessionId)
+    }
+    this.onSendInput = (sessionId, input) => {
+      hub.sendUserInput(sessionId, input).catch(() => {})
+    }
     this.streamDisposer = unsub
     return unsub
   }

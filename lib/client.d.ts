@@ -55,6 +55,10 @@ export declare class VirtualTerminalBuffer {
     clear(): void;
 }
 export interface TermStreamClientOptions {
+    /** Initial command name if known prior to stream init frame. */
+    initialCommand?: string;
+    /** Initial mode if known prior to stream init frame. */
+    initialMode?: 'interactive' | 'hands-free' | 'dispatch' | 'monitor';
     /** Maximum scrollback lines in the virtual buffer (default: 1000). */
     maxScrollback?: number;
     /** Callback invoked when input should be sent to backend PTY (during user takeover). */
@@ -73,8 +77,8 @@ export declare class TermStreamClient {
     private readonly renderers;
     private readonly stateListeners;
     private readonly outputListeners;
-    private readonly onSendInput?;
-    private readonly onLockRequest?;
+    onSendInput?: (sessionId: string, input: string) => void;
+    onLockRequest?: (sessionId: string, action: 'acquire' | 'release', user?: string) => void;
     private streamDisposer?;
     constructor(sessionId: string, options?: TermStreamClientOptions);
     /** Get current snapshot of the session state. */

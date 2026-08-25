@@ -78,6 +78,10 @@ export interface StreamHubOptions {
   maxHistoryFrames?: number
   /** Optional callback invoked on every broadcast (e.g. to emit Cordis events). */
   onBroadcast?: (frame: TermFrame) => void
+  /** Handler for direct user input (PTY write) during takeover. */
+  onUserInput?: (sessionId: string, input: string) => Promise<string | void> | string | void
+  /** Handler called when user releases takeover lock (for agent wakeup and context sync). */
+  onReleaseLock?: (sessionId: string, summary?: string) => void
 }
 
 /**
@@ -90,10 +94,14 @@ export class StreamHub {
   private readonly lockStates = new Map<string, { state: 'agent_driving' | 'user_takeover'; lockedBy?: string }>()
   private readonly maxHistory: number
   private readonly onBroadcast?: (frame: TermFrame) => void
+  private readonly onUserInput?: (sessionId: string, input: string) => Promise<string | void> | string | void
+  private readonly onReleaseLock?: (sessionId: string, summary?: string) => void
 
   constructor(options: StreamHubOptions = {}) {
     this.maxHistory = options.maxHistoryFrames ?? 50
     this.onBroadcast = options.onBroadcast
+    this.onUserInput = options.onUserInput
+    this.onReleaseLock = options.onReleaseLock
   }
 
   /**
@@ -207,8 +215,21 @@ export class StreamHub {
     return true
   }
 
-  /** Release user takeover lock back to agent driving. Returns true if state changed. */
-  releaseLock(sessionId: string): boolean {
+  /**
+   * Send user input directly to the backend PTY session (Takeover Mode).
+   */
+  async sendUserInput(sessionId: string, input: string): Promise<string | void> {
+    if (this.onUserInput === undefined) {
+      throw new Error('StreamHub: no onUserInput handler registered')
+    }
+    return await this.onUserInput(sessionId, input)
+  }
+
+  /**
+   * Release user takeover lock back to agent driving and notify agent of handback.
+   * Returns true if state changed.
+   */
+  releaseLock(sessionId: string, summary?: string): boolean {
     const current = this.getLockState(sessionId)
     if (current.state === 'agent_driving') return false
     this.broadcast({
@@ -218,7 +239,19 @@ export class StreamHub {
       lockedBy: undefined,
       time: Date.now(),
     })
+    try {
+      this.onReleaseLock?.(sessionId, summary)
+    } catch {
+      // Safe dispatch
+    }
     return true
+  }
+
+  /**
+   * Alias for releaseLock: explicitly yields interactive control back to the agent.
+   */
+  handback(sessionId: string, summary?: string): boolean {
+    return this.releaseLock(sessionId, summary)
   }
 
   /** Retrieve recent history frames for a session. */

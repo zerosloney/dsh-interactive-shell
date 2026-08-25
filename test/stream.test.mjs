@@ -158,3 +158,44 @@ test('StreamHub: handles failing listener gracefully without disrupting other li
   assert.equal(okReceived.length, 1)
   hub.dispose()
 })
+
+test('StreamHub: sendUserInput delegates to onUserInput or throws when unconfigured', async () => {
+  const unconfiguredHub = new StreamHub()
+  await assert.rejects(
+    () => unconfiguredHub.sendUserInput('s1', 'input'),
+    /no onUserInput handler registered/,
+  )
+  unconfiguredHub.dispose()
+
+  const received = []
+  const configuredHub = new StreamHub({
+    onUserInput: async (sessionId, input) => {
+      received.push({ sessionId, input })
+      return 'viewport-result'
+    },
+  })
+  const res = await configuredHub.sendUserInput('s1', 'echo 1\n')
+  assert.equal(res, 'viewport-result')
+  assert.equal(received.length, 1)
+  assert.equal(received[0].sessionId, 's1')
+  assert.equal(received[0].input, 'echo 1\n')
+  configuredHub.dispose()
+})
+
+test('StreamHub: releaseLock and handback trigger onReleaseLock callback with summary', () => {
+  const released = []
+  const hub = new StreamHub({
+    onReleaseLock: (sessionId, summary) => {
+      released.push({ sessionId, summary })
+    },
+  })
+
+  hub.acquireLock('s1', 'alice')
+  const ok = hub.handback('s1', 'User finished editing')
+  assert.equal(ok, true)
+  assert.equal(released.length, 1)
+  assert.equal(released[0].sessionId, 's1')
+  assert.equal(released[0].summary, 'User finished editing')
+  hub.dispose()
+})
+
