@@ -2,7 +2,7 @@
 
 让 Agent 亲手驱动真实交互式 CLI（vim / psql / ssh / `npm run dev` / `docker logs -f`），用户在 Web 端实时观看输出并可随时按键接管。移植自 [pi-interactive-shell](https://github.com/nicobailon/pi-interactive-shell)，深度融合 DeepSeek Harness 的 `ctx.terminals` PTY 缝隙与 Cordis 服务总线。
 
-**状态：生产就绪（M1 ~ M8 全量落地与加固，单元/集成/E2E 75/75 测试全绿，覆盖率 94.92%+）。**
+**状态：生产就绪（M1 ~ M8 全量落地与加固，单元/集成/E2E 86/86 测试全绿，行覆盖率 96.05%）。**
 
 ---
 

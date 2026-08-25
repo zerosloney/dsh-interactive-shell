@@ -11,7 +11,7 @@
 | `npm run typecheck` | 类型检查（tsc --noEmit） |
 | `npm run lint` | oxlint 静态检查（CI 门禁，0 警告 0 错误） |
 | `npm test` | 构建 + node:test 全量测试 |
-| `npm run coverage` | 覆盖率报告（v8，行覆盖 ≥80% 目标） |
+| `node --experimental-test-coverage --test "test/*.test.mjs"` | 覆盖率报告（v8，见下方"覆盖率"一节） |
 | `npm pack` | 产出可分发 tarball（含版本号，`docs/packages/`） |
 
 ## 覆盖率
@@ -19,10 +19,6 @@
 ```bash
 node --experimental-test-coverage --test "test/*.test.mjs"
 ```
-
-核心模块（`src/index.ts` + `src/pure.ts` + `src/trace.ts`）行覆盖率目标 ≥ 80%；
-纯函数层（`pure.ts`）保持 100%。关键分支与异常路径必须有对应测试
-（见 `test/` 下各用例的"异常路径"分组）。
 
 ## 架构摘要
 
