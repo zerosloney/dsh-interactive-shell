@@ -1,24 +1,10 @@
-/**
- * dsh-interactive-shell: the agent drives real interactive CLIs over the
- * harness `ctx.terminals` PTY seam — a port of pi-interactive-shell's
- * Monitor/Dispatch product layer onto DeepSeek Harness.
- *
- * One `interactive_shell` tool with an `action` field (spawn / send / status
- * / read / kill / attach-monitor), not one tool per verb — the per-request
- * schema-budget lesson from the Pi-vs-DSH benchmark. Modes:
- *
- * - interactive: stable sessionId; agent sends input, checks status.
- * - hands-free: agent polls and receives quiet-window output tails.
- * - dispatch:   fire-and-forget; the agent is woken once on completion
- *               (exit / quiet / timeout / kill) with the output tail.
- * - monitor:    event-driven wake-up on stream triggers or file watching —
- *               zero polling between events.
- *
- * @module dsh-interactive-shell
- */
 import type { Context } from '@deepseek-ai/cordis';
 import z from '@deepseek-ai/schemastery';
 import type { ShellMode } from './pure.js';
+import { StreamHub } from './stream.js';
+import type { TermFrame } from './stream.js';
+export * from './stream.js';
+export * from './client.js';
 /** Cordis plugin name used by loader diagnostics. */
 export declare const name = "interactive-shell";
 /**
@@ -42,6 +28,9 @@ export interface Config {
 }
 export declare const Config: z<Config>;
 declare module '@deepseek-ai/cordis' {
+    interface Context {
+        interactiveShellStream: StreamHub;
+    }
     interface Events {
         /** A session spawned by this bridge became live. */
         'interactive-shell/session-started'(payload: {
@@ -60,6 +49,14 @@ declare module '@deepseek-ai/cordis' {
             sessionId: string;
             trigger: string;
             tail: string;
+        }): void;
+        /** A streaming frame was broadcasted to Web UI / stream subscribers (Phase 1). */
+        'interactive-shell/stream-frame'(frame: TermFrame): void;
+        /** Takeover lock status changed between Agent and User (Phase 1). */
+        'interactive-shell/lock-changed'(payload: {
+            sessionId: string;
+            state: 'agent_driving' | 'user_takeover';
+            lockedBy?: string;
         }): void;
     }
 }

@@ -172,3 +172,184 @@ test('unknown action 的错误写入 trace 台账（异常路径可追溯）', a
   assert.match(trace[0].detail.message, /unknown action/)
   stop()
 })
+
+// ---------- P0/P1/P2 闭环与生命周期测试 ----------
+
+test('P0: dispatch 完成时通过 agent.followup 唤醒 Agent', async () => {
+  const { registered, stop, terminals } = makeCtx({ dispatchQuietMs: 200 })
+  const tool = registered[0]
+  const wokeMessages = []
+  const agent = {
+    id: 'agent-1',
+    followup: (msg) => wokeMessages.push(msg),
+  }
+  const exec = { signal: new AbortController().signal, agent }
+
+  terminals.setOutput('building...\n')
+  await tool.execute({ action: 'spawn', command: 'npm run build', mode: 'dispatch' }, exec)
+  terminals.setOutput('')
+
+  // 等待静默完成
+  await sleep(1000)
+  assert.ok(wokeMessages.length >= 1, `Agent 应收到 followup 唤醒消息，实际收到 ${wokeMessages.length}`)
+  const msg = wokeMessages[0]
+  assert.equal(msg.role, 'user')
+  assert.equal(msg.source.kind, 'plugin')
+  assert.equal(msg.source.plugin, 'interactive-shell')
+  assert.match(msg.content[0].text, /completed/)
+  stop()
+})
+
+test('P0: monitor 触发时通过 agent.followup 唤醒 Agent', async () => {
+  const { registered, stop, terminals } = makeCtx({ monitorCooldownMs: 100 })
+  const tool = registered[0]
+  const wokeMessages = []
+  const agent = {
+    id: 'agent-1',
+    followup: (msg) => wokeMessages.push(msg),
+  }
+  const exec = { signal: new AbortController().signal, agent }
+
+  const spawned = await tool.execute({ action: 'spawn', command: 'tail -f logs', mode: 'interactive' }, exec)
+  await tool.execute({ action: 'attach-monitor', sessionId: spawned.sessionId, trigger: 'FATAL' }, exec)
+
+  terminals.setOutput('FATAL: disk full\n')
+  await sleep(1200)
+
+  assert.ok(wokeMessages.length >= 1, `Monitor 触发后 Agent 应收到 followup 消息，实际 ${wokeMessages.length}`)
+  const msg = wokeMessages[0]
+  assert.match(msg.content[0].text, /FATAL/)
+  assert.equal(msg.source.summary, `Shell session ${spawned.sessionId} triggered on /FATAL/`)
+  stop()
+})
+
+test('P1: status 发现会话已退出时清理内部状态 Map', async () => {
+  let snapStatus = { kind: 'running' }
+  const fakeTerm = {
+    list: () => [{ sessionId: 't1', status: snapStatus, type: 'shell' }],
+    spawn: async () => ({ sessionId: 't1', status: snapStatus, type: 'shell', motd: 'ok' }),
+    read: () => ({ text: 'exited output', totalLines: 1, lineBegin: 0, lineEnd: 1, truncated: false }),
+    kill: async () => true,
+  }
+  const ctx = new Context()
+  ctx.provide('terminals', fakeTerm)
+  const registered = []
+  ctx.provide('tools', { register: (tool) => { registered.push(tool); return () => {} } })
+  const stop = apply(ctx, {
+    defaultMode: 'interactive',
+    maxSessions: 4,
+    outputTailBytes: 4096,
+    dispatchQuietMs: 5000,
+    dispatchTimeoutMs: 600000,
+    monitorCooldownMs: 2000,
+    monitorMaxEvents: 100,
+    tracePath: '',
+  })
+  const tool = registered[0]
+  const exec = { signal: new AbortController().signal, agent: { id: 'agent-1' } }
+
+  await tool.execute({ action: 'spawn', command: 'python script.py', mode: 'interactive' }, exec)
+  // 模拟进程退出
+  snapStatus = { kind: 'exited', exitCode: 0 }
+  const statusRes = await tool.execute({ action: 'status', sessionId: 't1' }, exec)
+  assert.equal(statusRes.exited, true)
+  assert.match(statusRes.text, /status=exited exit=0/)
+
+  stop()
+})
+
+test('P2: watch 监听文件变化并在 monitor 模式下触发通知与唤醒', async () => {
+  const { writeFileSync } = await import('node:fs')
+  const dir = mkdtempSync(join(tmpdir(), 'sh-watch-'))
+  const watchFile = join(dir, 'test.log')
+  writeFileSync(watchFile, 'initial line\n', 'utf8')
+
+  const { ctx, registered, stop } = makeCtx({ monitorCooldownMs: 100 })
+  const tool = registered[0]
+  const wokeMessages = []
+  const agent = {
+    id: 'agent-1',
+    followup: (msg) => wokeMessages.push(msg),
+  }
+  const exec = { signal: new AbortController().signal, agent }
+  const events = []
+  ctx.on('interactive-shell/monitor-triggered', (payload) => events.push(payload))
+
+  const spawned = await tool.execute({
+    action: 'spawn',
+    command: 'tail -f test.log',
+    mode: 'monitor',
+    watch: watchFile,
+  }, exec)
+  assert.ok(spawned.sessionId)
+
+  // 修改被监听的文件
+  await sleep(100)
+  writeFileSync(watchFile, 'updated line\n', 'utf8')
+  await sleep(600)
+
+  assert.ok(events.length >= 1, `watch 文件变化后应触发 monitor-triggered，实际 ${events.length}`)
+  assert.equal(events[0].trigger, `watch:${watchFile}`)
+  assert.ok(wokeMessages.length >= 1, `watch 触发后 Agent 应收到 followup，实际 ${wokeMessages.length}`)
+  stop()
+})
+
+// ---------- M4 Phase 1: 流式适配层与事件广播测试 ----------
+
+test('M4 Phase 1: 挂载 interactiveShellStream 并广播 stream-frame (init / output / event)', async () => {
+  const { ctx, registered, stop, terminals } = makeCtx()
+  const tool = registered[0]
+  const exec = { signal: new AbortController().signal, agent: { id: 'agent-1' } }
+
+  const streamFrames = []
+  ctx.on('interactive-shell/stream-frame', (frame) => streamFrames.push(frame))
+
+  assert.ok(ctx.interactiveShellStream, 'Context 应挂载 interactiveShellStream Hub 实例')
+
+  // 1. spawn 时派发 init 与 session-started 帧
+  const spawned = await tool.execute({ action: 'spawn', command: 'node server.js', mode: 'interactive' }, exec)
+  assert.ok(spawned.sessionId)
+
+  const initFrames = streamFrames.filter((f) => f.type === 'term:init')
+  assert.equal(initFrames.length, 1)
+  assert.equal(initFrames[0].sessionId, spawned.sessionId)
+  assert.equal(initFrames[0].command, 'node server.js')
+
+  // 2. 产生输出并读取时派发 output 帧
+  terminals.setOutput('Server running on port 3000\n')
+  await tool.execute({ action: 'read', sessionId: spawned.sessionId }, exec)
+
+  // 3. kill 时派发 session-killed 帧并清理
+  await tool.execute({ action: 'kill', sessionId: spawned.sessionId }, exec)
+  const killFrames = streamFrames.filter((f) => f.type === 'term:event' && f.event === 'session-killed')
+  assert.equal(killFrames.length, 1)
+
+  stop()
+})
+
+test('M4 Phase 1: 控制权锁变更时广播 lock 帧与 lock-changed 事件', async () => {
+  const { ctx, stop } = makeCtx()
+  const lockEvents = []
+  ctx.on('interactive-shell/lock-changed', (payload) => lockEvents.push(payload))
+
+  const streamHub = ctx.interactiveShellStream
+  assert.ok(streamHub)
+
+  // 获取接管锁
+  const acquired = streamHub.acquireLock('t1', 'developer-bob')
+  assert.equal(acquired, true)
+  assert.equal(lockEvents.length, 1)
+  assert.equal(lockEvents[0].sessionId, 't1')
+  assert.equal(lockEvents[0].state, 'user_takeover')
+  assert.equal(lockEvents[0].lockedBy, 'developer-bob')
+
+  // 释放接管锁
+  const released = streamHub.releaseLock('t1')
+  assert.equal(released, true)
+  assert.equal(lockEvents.length, 2)
+  assert.equal(lockEvents[1].state, 'agent_driving')
+  assert.equal(lockEvents[1].lockedBy, undefined)
+
+  stop()
+})
+

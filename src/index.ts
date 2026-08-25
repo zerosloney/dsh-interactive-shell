@@ -16,9 +16,11 @@
  *
  * @module dsh-interactive-shell
  */
+import { watch } from 'node:fs'
 import type { Context } from '@deepseek-ai/cordis'
 import z from '@deepseek-ai/schemastery'
 import type { Agent } from '@deepseek-ai/dsh-agent'
+import { createUserMessage } from '@deepseek-ai/dsh-llm'
 import { TerminalSessionId, TerminalSessionService } from '@deepseek-ai/dsh-terminal'
 import type { ToolDefinition } from '@deepseek-ai/dsh-tools'
 import {
@@ -32,6 +34,11 @@ import {
 } from './pure.js'
 import type { ShellMode, ShellToolArgs } from './pure.js'
 import { TraceSink } from './trace.js'
+import { StreamHub } from './stream.js'
+import type { TermFrame } from './stream.js'
+
+export * from './stream.js'
+export * from './client.js'
 
 /** Cordis plugin name used by loader diagnostics. */
 export const name = 'interactive-shell'
@@ -74,6 +81,9 @@ export const Config = z.object({
 }) as unknown as z<Config>
 
 declare module '@deepseek-ai/cordis' {
+  interface Context {
+    interactiveShellStream: StreamHub
+  }
   interface Events {
     /** A session spawned by this bridge became live. */
     'interactive-shell/session-started'(payload: {
@@ -93,6 +103,14 @@ declare module '@deepseek-ai/cordis' {
       trigger: string
       tail: string
     }): void
+    /** A streaming frame was broadcasted to Web UI / stream subscribers (Phase 1). */
+    'interactive-shell/stream-frame'(frame: TermFrame): void
+    /** Takeover lock status changed between Agent and User (Phase 1). */
+    'interactive-shell/lock-changed'(payload: {
+      sessionId: string
+      state: 'agent_driving' | 'user_takeover'
+      lockedBy?: string
+    }): void
   }
 }
 
@@ -105,6 +123,10 @@ interface SessionState {
   command: string
   /** Monitor trigger regex source; attach-monitor may (re)set it later. */
   trigger: string | undefined
+  /** Monitor file watch target path. */
+  watch: string | undefined
+  /** Disposer for the attached file watcher (if any). */
+  watcherDispose: (() => void) | undefined
   /** Last output read offset (for tail deltas). */
   lastRead: number
   /** When the session last produced new output (dispatch quiet-window base). */
@@ -146,19 +168,117 @@ export function apply(ctx: Context, config: Config): () => void {
   // 事件台账：关键生命周期与错误持久化，供运行回溯审计（最小收集：只记事件与摘要）。
   const trace = TraceSink.create(config.tracePath)
 
+  // M4 Phase 1: 实时流广播与控制权管理器
+  const streamHub = new StreamHub({
+    onBroadcast: (frame) => {
+      ctx.emit('interactive-shell/stream-frame', frame)
+      if (frame.type === 'term:lock') {
+        ctx.emit('interactive-shell/lock-changed', {
+          sessionId: frame.sessionId,
+          state: frame.state,
+          lockedBy: frame.lockedBy,
+        })
+      }
+    },
+  })
+  ctx.provide('interactiveShellStream', streamHub)
+
+  /**
+   * P0: Deliver a model-visible user-turn notice to the owning agent to wake its driver loop.
+   */
+  function wakeAgent(owner: Agent | undefined, summary: string, text: string): void {
+    if (owner === undefined || typeof owner.followup !== 'function') return
+    try {
+      const wakeMsg = createUserMessage({
+        content: [{ type: 'text', text }],
+        source: {
+          kind: 'plugin',
+          plugin: 'interactive-shell',
+          form: 'notice',
+          summary,
+        },
+      })
+      owner.followup(wakeMsg)
+    } catch (err) {
+      trace.record('error', {
+        action: 'wake-agent',
+        message: err instanceof Error ? err.message : String(err),
+      })
+    }
+  }
+
+  /**
+   * P2: Attach a file watcher for event-driven wake-up upon file changes.
+   */
+  function attachFileWatch(state: SessionState, filePath: string): () => void {
+    try {
+      const fsWatcher = watch(filePath, (eventType) => {
+        state.lastOutputAt = Date.now()
+        if (state.mode === 'monitor') {
+          if (!monitorCooldownElapsed(state.lastEventAt, Date.now(), config.monitorCooldownMs)) return
+          if (monitorBudgetExhausted(state.eventsFired, config.monitorMaxEvents)) {
+            state.monitoring = false
+            return
+          }
+          state.lastEventAt = Date.now()
+          state.eventsFired += 1
+          const tail = `[watch] File '${filePath}' changed (${eventType})`
+          ctx.emit('interactive-shell/monitor-triggered', {
+            sessionId: state.sessionId,
+            trigger: `watch:${filePath}`,
+            tail,
+          })
+          trace.record('monitor-triggered', { sessionId: state.sessionId, trigger: `watch:${filePath}` })
+          streamHub.broadcast({
+            type: 'term:event',
+            sessionId: state.sessionId,
+            event: 'monitor-triggered',
+            payload: { trigger: `watch:${filePath}`, tail },
+            time: Date.now(),
+          })
+          wakeAgent(
+            state.owner,
+            `Shell session ${state.sessionId} file '${filePath}' changed`,
+            `[interactive_shell] Session ${state.sessionId} (${state.command}) watch triggered on file '${filePath}' (${eventType}).`,
+          )
+        }
+      })
+      return () => fsWatcher.close()
+    } catch (err) {
+      trace.record('error', {
+        action: 'attach-file-watch',
+        message: err instanceof Error ? err.message : String(err),
+      })
+      return () => {}
+    }
+  }
+
   /**
    * Read the bounded tail of one session since the last read, using the
    * owning agent (never a fabricated owner object) so the terminals seam's
    * owner checks see the real caller.
+   *
+   * P1: Pass state.lastRead as offset to ensure pagination/cursor correctness.
+   * M4 Phase 1: Broadcast real-time chunk output frame to Web UI stream hub.
    */
   function readTail(state: SessionState): string {
     const result = term.read(
       state.owner,
       TerminalSessionId(state.sessionId),
-      { count: 200 },
+      { count: 200, offset: state.lastRead },
     )
     state.lastRead = result.lineEnd
-    if (result.text.length > 0) state.lastOutputAt = Date.now()
+    if (result.text.length > 0) {
+      state.lastOutputAt = Date.now()
+      streamHub.broadcast({
+        type: 'term:output',
+        sessionId: state.sessionId,
+        chunk: result.text,
+        lineBegin: result.lineBegin,
+        lineEnd: result.lineEnd,
+        time: Date.now(),
+      })
+    }
     return truncateTail(result.text, config.outputTailBytes)
   }
 
@@ -187,6 +307,27 @@ export function apply(ctx: Context, config: Config): () => void {
       tail: delta,
     })
     trace.record('dispatch-completed', { sessionId: state.sessionId, exitCode })
+    streamHub.broadcast({
+      type: 'term:event',
+      sessionId: state.sessionId,
+      event: 'dispatch-completed',
+      payload: { exitCode, tail: delta },
+      time: Date.now(),
+    })
+    if (exited) {
+      streamHub.broadcast({
+        type: 'term:exit',
+        sessionId: state.sessionId,
+        exitCode,
+        time: Date.now(),
+      })
+    }
+    // P0: 唤醒 Agent 对话回路
+    wakeAgent(
+      state.owner,
+      `Shell session ${state.sessionId} completed (exitCode=${exitCode})`,
+      `[interactive_shell] Session ${state.sessionId} (${state.command}) completed (exitCode=${exitCode}).\n\nOutput tail:\n${delta}`,
+    )
     stopPolling(state)
     // 会话已结束：从本地登记表移除，避免长时间运行后堆积（P0 附修）。
     sessions.delete(state.sessionId)
@@ -200,7 +341,7 @@ export function apply(ctx: Context, config: Config): () => void {
       // 会话已退出：停止轮询并清理登记（P1 附修：原实现不清理）。
       state.monitoring = false
       sessions.delete(state.sessionId)
-      state.dispose()
+      stopPolling(state)
       return
     }
     if (monitorBudgetExhausted(state.eventsFired, config.monitorMaxEvents)) {
@@ -218,6 +359,19 @@ export function apply(ctx: Context, config: Config): () => void {
       tail: delta,
     })
     trace.record('monitor-triggered', { sessionId: state.sessionId, trigger: state.trigger })
+    streamHub.broadcast({
+      type: 'term:event',
+      sessionId: state.sessionId,
+      event: 'monitor-triggered',
+      payload: { trigger: state.trigger, tail: delta },
+      time: Date.now(),
+    })
+    // P0: 唤醒 Agent 对话回路
+    wakeAgent(
+      state.owner,
+      `Shell session ${state.sessionId} triggered on /${state.trigger}/`,
+      `[interactive_shell] Session ${state.sessionId} (${state.command}) triggered on /${state.trigger}/.\n\nOutput tail:\n${delta}`,
+    )
   }
 
   /** Wire a poller for one session mode; returns the stop function. */
@@ -236,6 +390,8 @@ export function apply(ctx: Context, config: Config): () => void {
   }
 
   function stopPolling(state: SessionState): void {
+    state.watcherDispose?.()
+    state.watcherDispose = undefined
     state.dispose()
   }
 
@@ -294,16 +450,19 @@ export function apply(ctx: Context, config: Config): () => void {
             )
           }
           const mode = resolveMode(a.mode, config.defaultMode)
+          // P1: 不将单次 tool call 的 exec.signal 传递给长期运行的后台 PTY 进程
           const result = await terminals.spawn(exec.agent as Agent, {
             type: 'shell',
             name: a.command,
-          }, exec.signal)
+          })
           const state: SessionState = {
             sessionId: result.sessionId,
             owner: exec.agent as Agent,
             mode,
             command: a.command,
             trigger: a.trigger,
+            watch: a.watch,
+            watcherDispose: undefined,
             lastRead: 0,
             lastOutputAt: Date.now(),
             lastEventAt: undefined,
@@ -311,6 +470,9 @@ export function apply(ctx: Context, config: Config): () => void {
             startedAt: Date.now(),
             monitoring: mode === 'monitor',
             dispose: () => {},
+          }
+          if (a.watch !== undefined && a.watch !== '') {
+            state.watcherDispose = attachFileWatch(state, a.watch)
           }
           state.dispose = startPolling(state)
           sessions.set(result.sessionId, state)
@@ -320,6 +482,21 @@ export function apply(ctx: Context, config: Config): () => void {
             command: a.command,
           })
           trace.record('session-started', { sessionId: result.sessionId, mode, command: a.command })
+          streamHub.broadcast({
+            type: 'term:init',
+            sessionId: result.sessionId,
+            command: a.command,
+            mode,
+            motd: result.motd,
+            time: Date.now(),
+          })
+          streamHub.broadcast({
+            type: 'term:event',
+            sessionId: result.sessionId,
+            event: 'session-started',
+            payload: { mode, command: a.command },
+            time: Date.now(),
+          })
           return { sessionId: result.sessionId, text: result.motd, exited: false }
         }
         case 'send': {
@@ -337,12 +514,25 @@ export function apply(ctx: Context, config: Config): () => void {
         case 'status': {
           if (a.sessionId === undefined) throw new Error('interactive_shell status requires sessionId')
           const snap = term.list(exec.agent as Agent).find((s) => s.sessionId === a.sessionId)
-          if (snap === undefined) return { text: `session ${a.sessionId} not found`, exited: false }
+          if (snap === undefined) {
+            const state = sessions.get(a.sessionId)
+            if (state !== undefined) stopPolling(state)
+            sessions.delete(a.sessionId)
+            streamHub.cleanup(a.sessionId)
+            return { text: `session ${a.sessionId} not found`, exited: false }
+          }
           const tail = truncateTail(
             term.read(exec.agent as Agent, TerminalSessionId(a.sessionId)).text,
             config.outputTailBytes,
           )
           const exited = snap.status.kind === 'exited'
+          if (exited) {
+            // P1: 处于已退出状态的会话从 Map 中移除并停止监听
+            const state = sessions.get(a.sessionId)
+            if (state !== undefined) stopPolling(state)
+            sessions.delete(a.sessionId)
+            streamHub.cleanup(a.sessionId)
+          }
           return { sessionId: a.sessionId, text: `status=${snap.status.kind}${exited ? ` exit=${(snap.status as { exitCode: number | null }).exitCode}` : ''}\n${tail}`, exited }
         }
         case 'read': {
@@ -357,21 +547,40 @@ export function apply(ctx: Context, config: Config): () => void {
           if (state !== undefined) stopPolling(state)
           sessions.delete(a.sessionId)
           trace.record('session-killed', { sessionId: a.sessionId })
+          streamHub.broadcast({
+            type: 'term:event',
+            sessionId: a.sessionId,
+            event: 'session-killed',
+            payload: {},
+            time: Date.now(),
+          })
+          streamHub.cleanup(a.sessionId)
           return { sessionId: a.sessionId, text: 'terminated', exited: true }
         }
         case 'attach-monitor': {
-          if (a.sessionId === undefined || a.trigger === undefined) {
-            throw new Error('interactive_shell attach-monitor requires sessionId and trigger')
+          if (a.sessionId === undefined || (a.trigger === undefined && a.watch === undefined)) {
+            throw new Error('interactive_shell attach-monitor requires sessionId and trigger or watch')
           }
           const state = sessions.get(a.sessionId)
           if (state === undefined) throw new Error(`interactive-shell: session ${a.sessionId} not owned`)
-          if (state.monitoring) return { sessionId: a.sessionId, text: 'already monitoring', exited: false }
+          if (state.monitoring && a.trigger === undefined && a.watch === undefined) {
+            return { sessionId: a.sessionId, text: 'already monitoring', exited: false }
+          }
           state.monitoring = true
           state.mode = 'monitor'
-          // 关键修复：把 trigger 写回会话状态——poller 从 state 实时读取，
-          // 此前固化在 spawn 时闭包导致 attach-monitor 永不生效（P0 fix）。
-          state.trigger = a.trigger
-          return { sessionId: a.sessionId, text: `monitoring for /${a.trigger}/`, exited: false }
+          if (a.trigger !== undefined) {
+            state.trigger = a.trigger
+          }
+          if (a.watch !== undefined && a.watch !== '') {
+            state.watch = a.watch
+            state.watcherDispose?.()
+            state.watcherDispose = attachFileWatch(state, a.watch)
+          }
+          return {
+            sessionId: a.sessionId,
+            text: `monitoring for ${state.trigger ? `/${state.trigger}/` : ''}${state.watch ? ` watch:${state.watch}` : ''}`.trim(),
+            exited: false,
+          }
         }
         default:
           throw new Error(`interactive_shell: unknown action ${(a as { action: string }).action}`)
@@ -393,7 +602,11 @@ export function apply(ctx: Context, config: Config): () => void {
       disposeTool()
       for (const poller of pollers) clearInterval(poller)
       pollers.clear()
+      for (const state of sessions.values()) {
+        state.watcherDispose?.()
+      }
       sessions.clear()
+      streamHub.dispose()
     }
   }, 'interactive-shell.tool')
 
@@ -401,6 +614,10 @@ export function apply(ctx: Context, config: Config): () => void {
   return () => {
     for (const poller of pollers) clearInterval(poller)
     pollers.clear()
+    for (const state of sessions.values()) {
+      state.watcherDispose?.()
+    }
     sessions.clear()
+    streamHub.dispose()
   }
 }

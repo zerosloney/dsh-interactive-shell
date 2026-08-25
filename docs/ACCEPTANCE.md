@@ -1,14 +1,14 @@
-# 验收报告（ACCEPTANCE）— dsh-interactive-shell 0.1.0
+# 验收报告（ACCEPTANCE）— dsh-interactive-shell 0.1.1
 
 - 日期：2026-08-25
-- 版本：0.1.0（npm 包 `dsh-interactive-shell-0.1.0.tgz`）
+- 版本：0.1.1
 - 环境：Windows 10（22631）x64 · Node v22.22.0 · dsh 0.1.1-rc.2 生态
 
 ## 1. 测试摘要
 
 | 项 | 结果 |
 | --- | --- |
-| 自动化测试 | **22/22 通过**（单元 + apply 集成 + 真实时序回归） |
+| 自动化测试 | **34/34 通过**（单元 + apply 集成 + 真实时序回归 + P0/P1/P2 闭环 + M4 Phase 1 流式/控制权测试） |
 | lint（oxlint） | 0 警告 0 错误 |
 | 构建 | tsc strict 通过 |
 
@@ -16,17 +16,18 @@
 
 | 模块 | 行 | 分支 | 函数 |
 | --- | --- | --- | --- |
-| src/index.ts | 85.81% | 63.27% | 72.22% |
+| src/index.ts | 86.80% | 63.53% | 79.17% |
 | src/pure.ts | 93.22% | 100% | 87.50% |
+| src/stream.ts | 97.48% | 89.66% | 100% |
 | src/trace.ts | 83.05% | 72.73% | 66.67% |
-| **all files** | **91.77%** | **82.79%** | **85.71%** |
+| **all files** | **89.14%** | **74.31%** | **84.31%** |
 
-行覆盖 91.77% ≥ 80% 门槛；关键分支（预算守卫、静默窗时序、attach-monitor 触发、错误入账）均有专项测试。
+行覆盖 89.14% ≥ 80% 门槛；关键分支（预算守卫、静默窗时序、attach-monitor 触发、错误入账、M4 流式广播与锁状态）均有专项测试。
 
 ## 3. 安装验证（干净环境从零安装）
 
 1. 新建临时 `DSH_HOME` + `smoke` profile；
-2. `dsh plugin --profile smoke add dsh-interactive-shell-0.1.0.tgz` → 依赖解析完成；
+2. `dsh plugin --profile smoke add dsh-interactive-shell-0.1.1.tgz` → 依赖解析完成；
 3. `dsh --profile smoke --dump-config` → `id: interactive-shell` 已插入组合树；
 4. 无 `terminals` seam 的 headless 场景：插件优雅降级（不注册工具，日志提示），不阻断 composition。
 
@@ -50,9 +51,9 @@
 
 - **遗留**：M4 Web UI 面板（live 输出 + 用户接管）未实施——当前模型通过工具调用的文本视图驱动；不影响核心链路。
 - **tab 未激活的 monitor 效率**：monitor 模式为 500ms 本地轮询（不耗模型 token），与 README"事件驱动"表述存在差距，后续可换 seam 触发器。
-- **建议**：tag `v0.1.0` 触发 publish workflow（需仓库 `NPM_TOKEN` secret）；上线后以台账 `~/.dsh-interactive-shell/traces.jsonl` 观察错误密度。
+- **建议**：tag `v0.1.1` 触发 publish workflow（需仓库 `NPM_TOKEN` secret）；上线后以台账 `~/.dsh-interactive-shell/traces.jsonl` 观察错误密度。
 
 ## 7. 分发包校验
 
-- 文件：`docs/packages/dsh-interactive-shell-0.1.0.tgz`（15132 bytes）
-- SHA256：`9582CDE1BB973DBAFF01DC6C83A65D8BF5C8174530A09EFB4E82F9E716AACA7B`
+- 文件：`docs/packages/dsh-interactive-shell-0.1.1.tgz`（21870 bytes）
+- SHA256：`3021FEEDBB94CBC146F3DBB59DFEBE02392ED1E6F31A7E7005F35D306F9C2BED`
