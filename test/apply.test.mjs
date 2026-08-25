@@ -1,5 +1,8 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
+import { readFileSync, mkdtempSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import { Context } from '@deepseek-ai/cordis'
 import { apply } from '../lib/index.js'
 
@@ -43,6 +46,7 @@ function makeCtx(overrides = {}) {
     dispatchTimeoutMs: 600000,
     monitorCooldownMs: 2000,
     monitorMaxEvents: 100,
+    tracePath: '',
     ...overrides,
   })
   return { ctx, registered, stop, terminals }
@@ -57,7 +61,7 @@ test('apply registers the single interactive_shell tool', () => {
 })
 
 test('spawn action starts a session and returns its id + motd', async () => {
-  const { ctx, registered, stop } = makeCtx()
+  const { registered, stop } = makeCtx()
   const tool = registered[0]
   const exec = { signal: new AbortController().signal, agent: undefined }
   const result = await tool.execute({ action: 'spawn', command: 'vim config.yaml' }, exec)
@@ -125,5 +129,46 @@ test('dispatch 静默窗：持续输出不完成，静默后完成（P0: 原实�
   await sleep(1100)
   assert.ok(events.length >= 1, '静默窗后应触发 dispatch-completed')
   assert.equal(events[0].tail, '')
+  stop()
+})
+
+test('spawn 超过会话预算时拒绝（异常路径，预算守卫）', async () => {
+  const { registered, stop } = makeCtx({ maxSessions: 1 })
+  const tool = registered[0]
+  const exec = { signal: new AbortController().signal, agent: { id: 'agent-1' } }
+  const first = await tool.execute({ action: 'spawn', command: 'vim a.txt' }, exec)
+  assert.ok(first.sessionId)
+  await assert.rejects(
+    () => tool.execute({ action: 'spawn', command: 'vim b.txt' }, exec),
+    /budget exceeded/,
+  )
+  stop()
+})
+
+test('kill 已存在会话返回终止并写入台账（可追踪审计）', async () => {
+  const tracePath = join(tmpdir(), `sh-trace-${process.pid}-${Date.now()}.jsonl`)
+  const { registered, stop } = makeCtx({ tracePath })
+  const tool = registered[0]
+  const exec = { signal: new AbortController().signal, agent: { id: 'agent-1' } }
+  const spawned = await tool.execute({ action: 'spawn', command: 'top' }, exec)
+  const killed = await tool.execute({ action: 'kill', sessionId: spawned.sessionId }, exec)
+  assert.equal(killed.text, 'terminated')
+  assert.equal(killed.exited, true)
+  const trace = readFileSync(tracePath, 'utf8').trim().split('\n').map((l) => JSON.parse(l))
+  assert.ok(trace.some((e) => e.event === 'session-killed'), '应记录 session-killed 事件')
+  assert.ok(trace.some((e) => e.event === 'session-started'), '应记录 session-started 事件')
+  stop()
+})
+
+test('unknown action 的错误写入 trace 台账（异常路径可追溯）', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'sh-trace-'))
+  const tracePath = join(dir, 'traces.jsonl')
+  const { registered, stop } = makeCtx({ tracePath })
+  const tool = registered[0]
+  const exec = { signal: new AbortController().signal, agent: { id: 'agent-1' } }
+  await assert.rejects(() => tool.execute({ action: 'explode' }, exec), /unknown action/)
+  const trace = readFileSync(tracePath, 'utf8').trim().split('\n').map((l) => JSON.parse(l))
+  assert.equal(trace[0].event, 'error')
+  assert.match(trace[0].detail.message, /unknown action/)
   stop()
 })

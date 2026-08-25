@@ -37,6 +37,8 @@ export interface Config {
     dispatchTimeoutMs: number;
     monitorCooldownMs: number;
     monitorMaxEvents: number;
+    /** JSONL 事件台账路径；空 = ~/.dsh-interactive-shell/traces.jsonl。 */
+    tracePath: string;
 }
 export declare const Config: z<Config>;
 declare module '@deepseek-ai/cordis' {

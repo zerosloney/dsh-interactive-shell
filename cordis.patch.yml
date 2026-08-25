@@ -22,3 +22,5 @@
         monitorCooldownMs: 2000
         # Monitor mode: per-monitor event budget before auto-detach.
         monitorMaxEvents: 100
+        # JSONL 事件台账路径；留空 = ~/.dsh-interactive-shell/traces.jsonl（超限轮转 .1）
+        tracePath: ''

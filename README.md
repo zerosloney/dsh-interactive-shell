@@ -40,6 +40,27 @@
 
 每步先 `npm run typecheck`，行为验收走真实 `dsh --patch` 会话。
 
+## 运行数据与审计
+
+关键生命周期事件与错误写入 JSONL 台账（默认 `~/.dsh-interactive-shell/traces.jsonl`，`tracePath` 可配，超限自动轮转到 `.1`）：
+
+| 事件 | 时机 |
+| --- | --- |
+| `session-started` | spawn 成功（sessionId/mode/command） |
+| `dispatch-completed` | dispatch 模式完成（exitCode） |
+| `monitor-triggered` | monitor 触发（trigger） |
+| `session-killed` | kill 成功 |
+| `error` | 任意动作失败（action + 消息） |
+
+最小收集原则：只记事件与摘要，不记录会话输出内容。查看：`Get-Content ~/.dsh-interactive-shell/traces.jsonl`。
+
+## FAQ
+
+- **装完工具不出现？** 确认 profile 的 `dsh.profile.bundles` 已包含本包，并用 `dsh --profile <name> --dump-config` 检查 `id: interactive-shell` 已插入；headless profile 无 `terminals` seam 时插件会优雅降级（不注册工具，日志有提示）。
+- **台账写哪了？** 默认 `~/.dsh-interactive-shell/traces.jsonl`（`tracePath` 可改）；写入失败不影响调试（best-effort）。
+- **会话数上限？** `maxSessions`（默认 4）决定每 agent 并发 PTY 会话上限。
+- **如何参与开发/发布？** 见 `docs/DEVELOPMENT.md` 与 `CHANGELOG.md`。
+
 ## 参考
 
 - 上游：[nicobailon/pi-interactive-shell](https://github.com/nicobailon/pi-interactive-shell)（zigpty、四模式设计）

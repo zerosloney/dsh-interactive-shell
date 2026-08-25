@@ -20,7 +20,7 @@ import type { Context } from '@deepseek-ai/cordis'
 import z from '@deepseek-ai/schemastery'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import { TerminalSessionId, TerminalSessionService } from '@deepseek-ai/dsh-terminal'
-import type { ToolDefinition, ToolExecutionResult } from '@deepseek-ai/dsh-tools'
+import type { ToolDefinition } from '@deepseek-ai/dsh-tools'
 import {
   dispatchCompleted,
   monitorBudgetExhausted,
@@ -30,7 +30,8 @@ import {
   truncateTail,
   underSessionBudget,
 } from './pure.js'
-import type { ShellAction, ShellMode, ShellToolArgs } from './pure.js'
+import type { ShellMode, ShellToolArgs } from './pure.js'
+import { TraceSink } from './trace.js'
 
 /** Cordis plugin name used by loader diagnostics. */
 export const name = 'interactive-shell'
@@ -52,6 +53,8 @@ export interface Config {
   dispatchTimeoutMs: number
   monitorCooldownMs: number
   monitorMaxEvents: number
+  /** JSONL 事件台账路径；空 = ~/.dsh-interactive-shell/traces.jsonl。 */
+  tracePath: string
 }
 
 export const Config = z.object({
@@ -67,6 +70,7 @@ export const Config = z.object({
   dispatchTimeoutMs: z.number().min(1000).max(3600000).default(600000),
   monitorCooldownMs: z.number().min(0).max(60000).default(2000),
   monitorMaxEvents: z.number().step(1).min(1).max(1000).default(100),
+  tracePath: z.string().default(''),
 }) as unknown as z<Config>
 
 declare module '@deepseek-ai/cordis' {
@@ -139,6 +143,8 @@ export function apply(ctx: Context, config: Config): () => void {
 
   const sessions = new Map<string, SessionState>()
   const pollers = new Set<ReturnType<typeof setInterval>>()
+  // 事件台账：关键生命周期与错误持久化，供运行回溯审计（最小收集：只记事件与摘要）。
+  const trace = TraceSink.create(config.tracePath)
 
   /**
    * Read the bounded tail of one session since the last read, using the
@@ -180,6 +186,7 @@ export function apply(ctx: Context, config: Config): () => void {
       exitCode,
       tail: delta,
     })
+    trace.record('dispatch-completed', { sessionId: state.sessionId, exitCode })
     stopPolling(state)
     // 会话已结束：从本地登记表移除，避免长时间运行后堆积（P0 附修）。
     sessions.delete(state.sessionId)
@@ -210,6 +217,7 @@ export function apply(ctx: Context, config: Config): () => void {
       trigger: state.trigger,
       tail: delta,
     })
+    trace.record('monitor-triggered', { sessionId: state.sessionId, trigger: state.trigger })
   }
 
   /** Wire a poller for one session mode; returns the stop function. */
@@ -273,6 +281,7 @@ export function apply(ctx: Context, config: Config): () => void {
     },
     async execute(args: unknown, exec) {
       const a = (args ?? {}) as ShellToolArgs
+      try {
       switch (a.action) {
         case 'spawn': {
           if (a.command === undefined || a.command === '') {
@@ -310,6 +319,7 @@ export function apply(ctx: Context, config: Config): () => void {
             mode,
             command: a.command,
           })
+          trace.record('session-started', { sessionId: result.sessionId, mode, command: a.command })
           return { sessionId: result.sessionId, text: result.motd, exited: false }
         }
         case 'send': {
@@ -346,6 +356,7 @@ export function apply(ctx: Context, config: Config): () => void {
           const state = sessions.get(a.sessionId)
           if (state !== undefined) stopPolling(state)
           sessions.delete(a.sessionId)
+          trace.record('session-killed', { sessionId: a.sessionId })
           return { sessionId: a.sessionId, text: 'terminated', exited: true }
         }
         case 'attach-monitor': {
@@ -364,6 +375,14 @@ export function apply(ctx: Context, config: Config): () => void {
         }
         default:
           throw new Error(`interactive_shell: unknown action ${(a as { action: string }).action}`)
+      }
+      } catch (error) {
+        // 所有动作的失败都落台账（最小收集：action + 错误消息），再原样抛出。
+        trace.record('error', {
+          action: a.action,
+          message: error instanceof Error ? error.message : String(error),
+        })
+        throw error
       }
     },
   }
