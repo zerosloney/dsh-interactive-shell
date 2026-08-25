@@ -91,7 +91,7 @@ test('DshShellPanelController: toggleTakeover and quick actions dispatch', () =>
 
   // Quick actions: ctrl-c, ctrl-d, enter, clear, kill
   const sentInputs = []
-  client.onSendInput = (input) => sentInputs.push(input)
+  client.onSendInput = (_sessionId, input) => sentInputs.push(input)
 
   panel.dispatchQuickAction('ctrl-c')
   assert.equal(sentInputs[0], '\x03')
