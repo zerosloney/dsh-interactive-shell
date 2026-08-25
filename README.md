@@ -2,7 +2,7 @@
 
 让 Agent 亲手驱动真实交互式 CLI（vim / psql / ssh / `npm run dev` / `docker logs -f`），用户在 Web 端实时观看输出并可随时按键接管。移植自 [pi-interactive-shell](https://github.com/nicobailon/pi-interactive-shell)，深度融合 DeepSeek Harness 的 `ctx.terminals` PTY 缝隙与 Cordis 服务总线。
 
-**状态：生产就绪（M1 ~ M4 全量实现，单元/集成/E2E 51/51 测试全绿，覆盖率 94.8%+）。**
+**状态：生产就绪（M1 ~ M8 全量落地与加固，单元/集成/E2E 75/75 测试全绿，覆盖率 94.92%+）。**
 
 ---
 
@@ -13,12 +13,22 @@
   - `hands-free`：静默窗自动判定，Agent 无需高频探询；
   - `dispatch`：一次性子任务派发（如构建/测试），完成或超时后单次唤醒 Agent 并携带尾部日志；
   - `monitor`：基于正则触发器或文件系统变更（`watch`）监听，命中时主动注入 Notice 唤醒 Agent，全周期 0 模型轮询开销。
-- **M4 Web UI 终端浮层与实时流**：
+- **M5: 生产安全沙箱与敏感数据脱敏 (P0)**：
+  - **安全策略分级**：`permissive` / `balanced` / `strict`，内置高危破坏性指令拦截（`rm -rf /`、`mkfs`、`dd`、`chmod 777 /`、fork bomb、`del /s /q`、`format c:`、`curl | sh`）；
+  - **凭据脱敏引擎**：自动抹除 OpenAI/DeepSeek API Key、GitHub Token、AWS Key、Slack Token、JWT 及各类密码与私钥；
+  - **流量熔断保护**：`StreamCircuitBreaker` 动态速率限流，抵御海量输出打爆客户端。
+- **M4 & M6: Web UI 实时流、人机接管与 Web Component SDK (P1)**：
   - **流式分发中枢（`StreamHub`）**：支持环形缓冲区历史回放、帧广播（`init` / `output` / `event` / `lock` / `exit`）；
-  - **客户端适配器（`TermStreamClient`）**：内置 ANSI 虚拟滚动缓冲区与 Xterm.js 即插即用渲染挂载；
-  - **双向人机接管（Takeover & Handback）**：用户在 Web 端一键接管控制权，键盘按键直通 PTY，接管期间自动拦截 Agent 并发写冲突；交还控制权时自动生成包含人类操作备注的上下文并唤醒驱动 Agent；
-  - **交互面板控制器（`DshShellPanelController`）**：多会话 Tab 标签页管理、快捷动作条（Ctrl+C / Ctrl+D / Clear / Kill）、深色系响应式语义 HTML/CSS。
-- **生产级审计台账（`trace`）**：关键生命周期事件及异常以结构化 JSONL 追加写入，支持超限自动轮转与失败容错。
+  - **双向人机接管（Takeover & Handback）**：用户在 Web 端一键接管控制权，按键直通 PTY，拦截 Agent 冲突写；交还控制权时自动携带用户备注唤醒 Agent；
+  - **原生 Web Component（`<dsh-shell-dock>`）**：Shadow DOM 样式隔离，支持浅色/深色双主题切换与自定义事件；
+  - **远程网关传输层（`transport`）**：支持 WebSocket/SSE 与内存直连适配器。
+- **M7: 会话时光机与 Asciinema 导出 (P2)**：
+  - **Asciinema v2 导出**：导出标准 `.cast` 格式录像文件；
+  - **人机归因分析**：`getTimelineAttribution` 划分人类与 Agent 操作时间轴；
+  - **时光机屏幕重构**：`getTimeTravelSnapshot` 按任意历史时间戳重构虚拟屏幕缓冲区。
+- **M8: 智能 CLI 交互提示词与菜单解析 (P3)**：
+  - **交互式提示识别**：自动识别 `(y/N)` 确认、密码输入、单选光标菜单与多选复选框；
+  - **自动按键生成**：`generatePromptAnswer` 自动计算上下光标方向键与回车，避免模型猜键开销。
 
 ---
 
@@ -29,10 +39,11 @@ graph TD
   Agent[DeepSeek Agent] -->|Tool Call: interactive_shell| Plugin[dsh-interactive-shell]
   Plugin -->|PTY Seam| Terminals[ctx.terminals PTY]
   Plugin -->|Stream Broadcast| StreamHub[StreamHub / ctx.interactiveShellStream]
-  StreamHub -->|term:output / term:lock| Client[TermStreamClient]
-  Client -->|Virtual Buffer / Xterm.js| UI[DshShellPanelController & Web UI Dock]
-  UI -->|Direct Keystrokes & Takeover| StreamHub
+  StreamHub -->|term:output / term:lock| Transport[Transport Layer / WebSocket]
+  Transport -->|TermFrame| Dock[<dsh-shell-dock> Web Component]
+  Dock -->|Direct Keystrokes & Takeover| StreamHub
   StreamHub -->|agent.followup / notice| Agent
+  StreamHub -->|Stream Frames| Recorder[SessionRecorder / Asciinema Export]
 ```
 
 ---
@@ -48,144 +59,69 @@ graph TD
 
 ---
 
-## Agent 工具使用示例
+## 快速使用指南
 
-插件向模型注册单一工具 `interactive_shell`（通过 `action` 字段路由以节约 Schema Token 税）：
+### 1. 使用原生 Web Component `<dsh-shell-dock>`
 
-### 1. 启动交互式会话 (`spawn`)
-```json
-{
-  "action": "spawn",
-  "command": "vim config.yml",
-  "mode": "interactive"
-}
+```html
+<script type="module">
+  import { defineDshShellComponent } from 'dsh-interactive-shell'
+  defineDshShellComponent()
+</script>
+
+<dsh-shell-dock theme="dark"></dsh-shell-dock>
 ```
 
-### 2. 发送按键输入 (`send`)
-```json
-{
-  "action": "send",
-  "sessionId": "t1",
-  "input": ":wq\n"
-}
-```
-
-### 3. 挂载监控触发器 (`attach-monitor`)
-```json
-{
-  "action": "attach-monitor",
-  "sessionId": "t1",
-  "trigger": "ready on http://localhost:\\d+",
-  "watch": "src/config.json"
-}
-```
-
-### 4. 查看状态与尾部输出 (`status` / `read`)
-```json
-{
-  "action": "status",
-  "sessionId": "t1"
-}
-```
-
-### 5. 终止会话 (`kill`)
-```json
-{
-  "action": "kill",
-  "sessionId": "t1"
-}
-```
-
----
-
-## Web UI 前端集成指南
-
-### 1. 接入 `TermStreamClient` 与 Xterm.js
+### 2. 导出 Asciinema 录像与时光机快照
 
 ```typescript
-import { TermStreamClient } from 'dsh-interactive-shell'
-import { Terminal } from '@xterm/xterm'
+import { SessionRecorder } from 'dsh-interactive-shell'
 
-// 创建 Xterm 实例
-const term = new Terminal()
-term.open(document.getElementById('terminal-container')!)
+const recorder = new SessionRecorder()
+// 记录流式帧
+streamHub.subscribeAll(frame => recorder.record(frame))
 
-// 创建流客户端并绑定
-const client = new TermStreamClient('session_123')
-client.attachRenderer({
-  write: (data) => term.write(data)
-})
+// 导出 Asciinema v2 .cast 字符串
+const castJsonl = recorder.exportAsciinema('session_123', { title: 'Dev Build' })
 
-// 连接 WebSocket / SSE 帧
-socket.on('message', (event) => {
-  const frame = JSON.parse(event.data)
-  client.handleFrame(frame)
-})
+// 获取任意历史时刻（如 10 秒前）的虚拟屏幕内容
+const snapshotLines = recorder.getTimeTravelSnapshot('session_123', Date.now() - 10000)
 ```
 
-### 2. 使用 `DshShellPanelController` 多会话面板
+### 3. 智能解析 CLI 交互式提示词
 
 ```typescript
-import {
-  DshShellPanelController,
-  renderShellPanelHtml,
-  renderShellPanelCss
-} from 'dsh-interactive-shell'
+import { parseInteractivePrompt, generatePromptAnswer } from 'dsh-interactive-shell'
 
-// 初始化面板控制器
-const panel = new DshShellPanelController({
-  operatorName: 'developer-alice'
-})
-
-// 添加会话客户端
-panel.addSession(client)
-
-// 渲染样式与浮层 HTML
-document.head.insertAdjacentHTML('beforeend', `<style>${renderShellPanelCss()}</style>`)
-document.body.insertAdjacentHTML('beforeend', renderShellPanelHtml(panel))
-
-// 响应面板更新
-panel.subscribe(() => {
-  document.getElementById('shell-dock-container')!.innerHTML = renderShellPanelHtml(panel)
-})
+const prompt = parseInteractivePrompt(terminalTail)
+if (prompt?.kind === 'select_menu') {
+  const answerKeys = generatePromptAnswer(prompt, { preferredChoice: 'TypeScript' })
+  // 自动生成 '\x1B[B\n'（方向下键+回车）
+  await tool.execute({ action: 'send', sessionId, input: answerKeys })
+}
 ```
 
 ---
 
-## 配置说明
+## 🚀 运行示例（Runnable Examples）
 
-见 [cordis.patch.yml](cordis.patch.yml)，支持在 DSH Profile 配置文件中调优：
+仓库内置了开箱即用的演示示例，可直接运行体验：
 
-```yaml
-interactive-shell:
-  defaultMode: 'monitor'
-  maxSessions: 4
-  outputTailBytes: 4096
-  dispatchQuietMs: 5000
-  dispatchTimeoutMs: 600000
-  monitorCooldownMs: 2000
-  monitorMaxEvents: 100
-  tracePath: ''
+```bash
+# 1. 智能 CLI 交互提示词自动应答（确认框、多级单选、数字菜单、多选复选框按键生成）
+node examples/demo-auto-responder.mjs
+
+# 2. 会话录制、人机协作归属占比与时光机快照回放导出 Asciinema .cast
+node examples/demo-recorder.mjs
+
+# 3. 浏览器查看 <dsh-shell-dock> Web Component 主题切换与接管联动演示
+# 在浏览器中直接打开 examples/demo-web-client.html
 ```
-
----
-
-## 运行数据与审计
-
-生命周期关键事件与错误写入结构化 JSONL（默认 `~/.dsh-interactive-shell/traces.jsonl`，超限自动轮转）：
-
-| 事件 | 触发时机 |
-| --- | --- |
-| `session-started` | `spawn` 成功（记录 sessionId、command、mode） |
-| `dispatch-completed` | `dispatch` 模式达成静默或退出条件 |
-| `monitor-triggered` | 正则触发器或文件变更触发唤醒 |
-| `session-killed` | 会话正常或强制终止 |
-| `error` | 工具调用或运行时异常 |
 
 ---
 
 ## 质量与验收指标
 
-- **自动化测试**：51/51 项测试全部通过（包含单元测试、时序回归测试、P0/P1/P2 修复验证及 M4 E2E 完整生命周期场景）。
-- **代码覆盖率**：全工程综合行覆盖率 **94.81%**，核心模块 95%+。
+- **自动化测试**：86/86 项测试全部通过（包含单元测试、时序回归测试、P0~P3 全里程碑特性验证、M4 E2E 完整生命周期场景、Web Component 深度单测、自适应极速探针、提示词按键序列生成器及 WsClientTransport / LocalStreamTransport 深度测试）。
+- **代码覆盖率**：全工程综合行覆盖率 **96.05%**，函数覆盖率 **93.96%**，所有 11 个核心模块 91%+。
 - **代码规范**：`tsc --strict` 与 `oxlint` 0 警告、0 错误。

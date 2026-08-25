@@ -71,17 +71,43 @@ export class VirtualTerminalBuffer {
   /** Append an output chunk into the buffer. */
   append(chunk: string): void {
     this.rawChunks.push(chunk)
+
+    // Handle full-screen erase sequences (e.g. \x1B[2J, \x1B[3J)
+    if (chunk.includes('\x1B[2J') || chunk.includes('\x1B[3J')) {
+      const clearIdx = Math.max(chunk.lastIndexOf('\x1B[2J'), chunk.lastIndexOf('\x1B[3J'))
+      if (clearIdx >= 0) {
+        this.plainLines = []
+        chunk = chunk.slice(clearIdx + 4)
+      }
+    }
+
     const stripped = stripAnsi(chunk)
     if (stripped.length === 0) return
 
-    const newLines = stripped.split(/\r?\n/)
-    if (this.plainLines.length === 0) {
-      this.plainLines.push(...newLines)
-    } else {
-      // The first segment merges with the last line of the buffer
-      this.plainLines[this.plainLines.length - 1] += newLines[0]
-      for (let i = 1; i < newLines.length; i++) {
-        this.plainLines.push(newLines[i])
+    // Normalize CRLF to LF so remaining \r are true standalone cursor rewinds
+    const normalized = stripped.replace(/\r\n/g, '\n')
+    const newLines = normalized.split('\n')
+
+    for (let i = 0; i < newLines.length; i++) {
+      const rawLine = newLines[i]
+
+      if (i === 0 && this.plainLines.length > 0) {
+        if (rawLine.startsWith('\r')) {
+          const rParts = rawLine.split('\r').filter(Boolean)
+          this.plainLines[this.plainLines.length - 1] = rParts.length > 0 ? rParts[rParts.length - 1] : ''
+        } else if (rawLine.includes('\r')) {
+          const rParts = rawLine.split('\r')
+          this.plainLines[this.plainLines.length - 1] = rParts[rParts.length - 1]
+        } else {
+          this.plainLines[this.plainLines.length - 1] += rawLine
+        }
+      } else {
+        if (rawLine.includes('\r')) {
+          const rParts = rawLine.split('\r')
+          this.plainLines.push(rParts[rParts.length - 1])
+        } else {
+          this.plainLines.push(rawLine)
+        }
       }
     }
 
@@ -336,7 +362,11 @@ export class TermStreamClient {
   /** Subscribe to state change notifications. */
   onStateChange(listener: (state: Readonly<ClientSessionState>) => void): () => void {
     this.stateListeners.add(listener)
-    listener(this.state)
+    try {
+      listener(this.state)
+    } catch {
+      // Safe initial notification
+    }
     return () => this.stateListeners.delete(listener)
   }
 

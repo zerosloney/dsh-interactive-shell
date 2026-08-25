@@ -1,0 +1,141 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>DeepSeek Harness Interactive Shell — Web Dock Demo</title>
+  <style>
+    :root {
+      --bg: #0f172a;
+      --card-bg: #1e293b;
+      --text: #f8fafc;
+      --accent: #38bdf8;
+    }
+    body {
+      margin: 0;
+      padding: 2rem;
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
+      background-color: var(--bg);
+      color: var(--text);
+      min-height: 100vh;
+      box-sizing: border-box;
+    }
+    .container {
+      max-width: 900px;
+      margin: 0 auto;
+    }
+    h1 {
+      font-size: 1.75rem;
+      color: var(--accent);
+      margin-bottom: 0.5rem;
+    }
+    p {
+      color: #94a3b8;
+      line-height: 1.6;
+    }
+    .toolbar {
+      display: flex;
+      gap: 0.75rem;
+      margin: 1.5rem 0;
+      flex-wrap: wrap;
+    }
+    button {
+      background: var(--card-bg);
+      border: 1px solid #334155;
+      color: #f8fafc;
+      padding: 0.6rem 1.2rem;
+      border-radius: 8px;
+      cursor: pointer;
+      font-weight: 500;
+      transition: all 0.2s ease;
+    }
+    button:hover {
+      background: #334155;
+      border-color: var(--accent);
+    }
+    .badge-card {
+      background: var(--card-bg);
+      border: 1px solid #334155;
+      border-radius: 12px;
+      padding: 1.25rem;
+      margin-top: 1.5rem;
+    }
+    code {
+      background: #0f172a;
+      padding: 0.2rem 0.4rem;
+      border-radius: 4px;
+      color: var(--accent);
+      font-size: 0.9em;
+    }
+  </style>
+  <!-- Load dsh-interactive-shell bundle / module -->
+  <script type="module">
+    import { defineDshShellComponent, StreamHub } from '../lib/index.js'
+
+    // 1. Register Web Component
+    defineDshShellComponent('dsh-shell-dock')
+
+    // 2. Setup mock hub for interactive preview
+    const dock = document.querySelector('dsh-shell-dock')
+    const controller = dock.getController()
+
+    // Setup active session tab
+    controller.addTab({
+      sessionId: 'dev-server-1',
+      command: 'npm run dev',
+      mode: 'dispatch',
+      status: 'running',
+    })
+
+    const initialBuffer = [
+      '\x1b[36m vite v5.4.0 \x1b[0m\x1b[32m ready in 218 ms\x1b[0m\n',
+      '  \x1b[32m➜\x1b[0m  \x1b[1mLocal:\x1b[0m   \x1b[36mhttp://localhost:5173/\x1b[0m\n',
+      '  \x1b[32m➜\x1b[0m  \x1b[1mNetwork:\x1b[0m \x1b[2muse --host to expose\x1b[0m\n',
+      '  \x1b[32m➜\x1b[0m  press \x1b[1mh + enter\x1b[0m to show help\n',
+    ]
+
+    for (const chunk of initialBuffer) {
+      controller.appendOutput('dev-server-1', chunk)
+    }
+
+    // Expose helpers to window for buttons
+    window.toggleTheme = () => {
+      const current = dock.getAttribute('theme') || 'dark'
+      dock.setAttribute('theme', current === 'dark' ? 'light' : 'dark')
+    }
+
+    window.toggleTakeover = () => {
+      controller.toggleTakeover('dev-server-1', 'web_user')
+    }
+
+    window.addLog = () => {
+      const time = new Date().toLocaleTimeString()
+      controller.appendOutput('dev-server-1', `\x1b[90m[${time}]\x1b[0m GET /api/status \x1b[32m200 OK\x1b[0m (4ms)\n`)
+    }
+  </script>
+</head>
+<body>
+  <div class="container">
+    <h1>🚀 DeepSeek Harness — Interactive Shell Dock</h1>
+    <p>
+      This demo page showcases the zero-dependency <code>&lt;dsh-shell-dock&gt;</code> Web Component with
+      live ANSI color rendering, dark/light theme switching, and human takeover bridge.
+    </p>
+
+    <div class="toolbar">
+      <button onclick="toggleTakeover()">🎮 Toggle Takeover (Agent ⇄ Human)</button>
+      <button onclick="toggleTheme()">🌓 Switch Dark / Light Theme</button>
+      <button onclick="addLog()">⚡ Push Stream Log Event</button>
+    </div>
+
+    <div class="badge-card">
+      <h3>Web Component Integration Guide</h3>
+      <p>Embed the interactive shell dock anywhere in your Cordis / DSH Web UI:</p>
+      <pre><code>&lt;dsh-shell-dock open="true" theme="dark"&gt;&lt;/dsh-shell-dock&gt;</code></pre>
+    </div>
+  </div>
+
+  <!-- The Interactive Shell Dock Overlay Component -->
+  <dsh-shell-dock open="true" theme="dark"></dsh-shell-dock>
+</body>
+</html>

@@ -6,6 +6,12 @@ import type { TermFrame } from './stream.js';
 export * from './stream.js';
 export * from './client.js';
 export * from './ui.js';
+export * from './security.js';
+export * from './component.js';
+export * from './transport.js';
+export * from './recorder.js';
+export * from './prompts.js';
+import type { SecurityPolicyLevel } from './security.js';
 /** Cordis plugin name used by loader diagnostics. */
 export declare const name = "interactive-shell";
 /**
@@ -26,6 +32,14 @@ export interface Config {
     monitorMaxEvents: number;
     /** JSONL 事件台账路径；空 = ~/.dsh-interactive-shell/traces.jsonl。 */
     tracePath: string;
+    /** Global security policy level ('permissive' | 'balanced' | 'strict'). */
+    securityPolicy?: SecurityPolicyLevel;
+    /** List of command prefixes or regexes to block. */
+    blockedCommands?: string[];
+    /** Whitelist of permitted command prefixes (empty = all allowed). */
+    allowedCommandsOnly?: string[];
+    /** Whether to redact sensitive API keys and secrets (default: true). */
+    redactSensitiveData?: boolean;
 }
 export declare const Config: z<Config>;
 declare module '@deepseek-ai/cordis' {

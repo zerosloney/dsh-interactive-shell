@@ -40,6 +40,14 @@ import type { TermFrame } from './stream.js'
 export * from './stream.js'
 export * from './client.js'
 export * from './ui.js'
+export * from './security.js'
+export * from './component.js'
+export * from './transport.js'
+export * from './recorder.js'
+export * from './prompts.js'
+
+import { evaluateCommandSafety, redactSensitiveData } from './security.js'
+import type { SecurityPolicyLevel } from './security.js'
 
 /** Cordis plugin name used by loader diagnostics. */
 export const name = 'interactive-shell'
@@ -63,6 +71,14 @@ export interface Config {
   monitorMaxEvents: number
   /** JSONL 事件台账路径；空 = ~/.dsh-interactive-shell/traces.jsonl。 */
   tracePath: string
+  /** Global security policy level ('permissive' | 'balanced' | 'strict'). */
+  securityPolicy?: SecurityPolicyLevel
+  /** List of command prefixes or regexes to block. */
+  blockedCommands?: string[]
+  /** Whitelist of permitted command prefixes (empty = all allowed). */
+  allowedCommandsOnly?: string[]
+  /** Whether to redact sensitive API keys and secrets (default: true). */
+  redactSensitiveData?: boolean
 }
 
 export const Config = z.object({
@@ -79,6 +95,10 @@ export const Config = z.object({
   monitorCooldownMs: z.number().min(0).max(60000).default(2000),
   monitorMaxEvents: z.number().step(1).min(1).max(1000).default(100),
   tracePath: z.string().default(''),
+  securityPolicy: z.union([z.const('permissive'), z.const('balanced'), z.const('strict')]).default('balanced'),
+  blockedCommands: z.array(z.string()).default([]),
+  allowedCommandsOnly: z.array(z.string()).default([]),
+  redactSensitiveData: z.boolean().default(true),
 }) as unknown as z<Config>
 
 declare module '@deepseek-ai/cordis' {
@@ -165,7 +185,7 @@ export function apply(ctx: Context, config: Config): () => void {
   const term = terminals
 
   const sessions = new Map<string, SessionState>()
-  const pollers = new Set<ReturnType<typeof setInterval>>()
+  const pollers = new Set<() => void>()
   // 事件台账：关键生命周期与错误持久化，供运行回溯审计（最小收集：只记事件与摘要）。
   const trace = TraceSink.create(config.tracePath)
 
@@ -209,17 +229,24 @@ export function apply(ctx: Context, config: Config): () => void {
 
   /**
    * P0: Deliver a model-visible user-turn notice to the owning agent to wake its driver loop.
+   * M5: Redact sensitive API keys and secrets before sending to LLM context.
    */
   function wakeAgent(owner: Agent | undefined, summary: string, text: string): void {
     if (owner === undefined || typeof owner.followup !== 'function') return
     try {
+      const sanitizedText = config.redactSensitiveData !== false
+        ? redactSensitiveData(text).text
+        : text
+      const sanitizedSummary = config.redactSensitiveData !== false
+        ? redactSensitiveData(summary).text
+        : summary
       const wakeMsg = createUserMessage({
-        content: [{ type: 'text', text }],
+        content: [{ type: 'text', text: sanitizedText }],
         source: {
           kind: 'plugin',
           plugin: 'interactive-shell',
           form: 'notice',
-          summary,
+          summary: sanitizedSummary,
         },
       })
       owner.followup(wakeMsg)
@@ -398,19 +425,54 @@ export function apply(ctx: Context, config: Config): () => void {
     )
   }
 
-  /** Wire a poller for one session mode; returns the stop function. */
+  /** Wire an adaptive poller for one session mode; returns the stop function. */
   function startPolling(state: SessionState): () => void {
-    const timer = setInterval(() => {
-      // trigger/模式都从 state 实时读取：attach-monitor 后续设置的
-      // trigger 能真正生效（P0 fix：原实现把 trigger 固化在闭包里）。
-      if (state.mode === 'dispatch') pollDispatch(state)
-      else if (state.mode === 'monitor') pollMonitor(state)
-    }, 500)
-    pollers.add(timer)
-    return () => {
-      clearInterval(timer)
-      pollers.delete(timer)
+    let active = true
+    let currentDelayMs = 50
+    let timer: ReturnType<typeof setTimeout> | null = null
+
+    const tick = () => {
+      if (!active) return
+
+      let hasActivity = false
+      if (state.mode === 'dispatch') {
+        const prevRead = state.lastRead
+        pollDispatch(state)
+        if (!sessions.has(state.sessionId)) return
+        hasActivity = state.lastRead > prevRead
+      } else if (state.mode === 'monitor') {
+        const prevRead = state.lastRead
+        pollMonitor(state)
+        if (!sessions.has(state.sessionId) || !state.monitoring) return
+        hasActivity = state.lastRead > prevRead
+      }
+
+      // Adaptive backoff: fast probe (100ms) when output is actively flowing,
+      // smoothly backs off to 500ms when idle
+      if (hasActivity) {
+        currentDelayMs = 100
+      } else {
+        currentDelayMs = Math.min(500, Math.floor(currentDelayMs * 1.5))
+      }
+
+      if (active) {
+        timer = setTimeout(tick, currentDelayMs)
+      }
     }
+
+    timer = setTimeout(tick, 50)
+
+    const dispose = () => {
+      active = false
+      if (timer) {
+        clearTimeout(timer)
+        timer = null
+      }
+      pollers.delete(dispose)
+    }
+
+    pollers.add(dispose)
+    return dispose
   }
 
   function stopPolling(state: SessionState): void {
@@ -461,12 +523,27 @@ export function apply(ctx: Context, config: Config): () => void {
     },
     async execute(args: unknown, exec) {
       const a = (args ?? {}) as ShellToolArgs
+      const sanitizeOutput = (text: string): string =>
+        config.redactSensitiveData !== false ? redactSensitiveData(text).text : text
+
       try {
       switch (a.action) {
         case 'spawn': {
           if (a.command === undefined || a.command === '') {
             throw new Error('interactive_shell spawn requires a command')
           }
+          // M5: 生产安全沙箱与高危指令检查
+          const safety = evaluateCommandSafety(a.command, {
+            policyLevel: config.securityPolicy,
+            blockedCommands: config.blockedCommands,
+            allowedCommandsOnly: config.allowedCommandsOnly,
+          })
+          if (!safety.allowed) {
+            const errorMsg = `interactive-shell security policy violation [${safety.riskLevel}]: ${safety.reason}`
+            trace.record('error', { action: 'spawn', command: a.command, reason: safety.reason, riskLevel: safety.riskLevel })
+            throw new Error(errorMsg)
+          }
+
           const live = term.list(exec.agent as Agent).length
           if (!underSessionBudget(live, config.maxSessions)) {
             throw new Error(
@@ -521,12 +598,26 @@ export function apply(ctx: Context, config: Config): () => void {
             payload: { mode, command: a.command },
             time: Date.now(),
           })
-          return { sessionId: result.sessionId, text: result.motd, exited: false }
+          return { sessionId: result.sessionId, text: sanitizeOutput(result.motd), exited: false }
         }
         case 'send': {
           if (a.sessionId === undefined || a.input === undefined) {
             throw new Error('interactive_shell send requires sessionId and input')
           }
+          // M5: 生产安全沙箱与高危指令检查
+          if (a.input !== '') {
+            const safety = evaluateCommandSafety(a.input, {
+              policyLevel: config.securityPolicy,
+              blockedCommands: config.blockedCommands,
+              allowedCommandsOnly: config.allowedCommandsOnly,
+            })
+            if (!safety.allowed) {
+              const errorMsg = `interactive-shell security policy violation [${safety.riskLevel}]: ${safety.reason}`
+              trace.record('error', { action: 'send', sessionId: a.sessionId, reason: safety.reason, riskLevel: safety.riskLevel })
+              throw new Error(errorMsg)
+            }
+          }
+
           const lock = streamHub.getLockState(a.sessionId)
           if (lock.state === 'user_takeover') {
             throw new Error(
@@ -539,7 +630,7 @@ export function apply(ctx: Context, config: Config): () => void {
             signal: exec.signal,
           })
           const result = await op.done
-          return { sessionId: a.sessionId, text: result.viewport, exited: false }
+          return { sessionId: a.sessionId, text: sanitizeOutput(result.viewport), exited: false }
         }
         case 'status': {
           if (a.sessionId === undefined) throw new Error('interactive_shell status requires sessionId')
@@ -563,12 +654,12 @@ export function apply(ctx: Context, config: Config): () => void {
             sessions.delete(a.sessionId)
             streamHub.cleanup(a.sessionId)
           }
-          return { sessionId: a.sessionId, text: `status=${snap.status.kind}${exited ? ` exit=${(snap.status as { exitCode: number | null }).exitCode}` : ''}\n${tail}`, exited }
+          return { sessionId: a.sessionId, text: sanitizeOutput(`status=${snap.status.kind}${exited ? ` exit=${(snap.status as { exitCode: number | null }).exitCode}` : ''}\n${tail}`), exited }
         }
         case 'read': {
           if (a.sessionId === undefined) throw new Error('interactive_shell read requires sessionId')
           const result = term.read(exec.agent as Agent, TerminalSessionId(a.sessionId))
-          return { sessionId: a.sessionId, text: truncateTail(result.text, config.outputTailBytes), exited: false }
+          return { sessionId: a.sessionId, text: sanitizeOutput(truncateTail(result.text, config.outputTailBytes)), exited: false }
         }
         case 'kill': {
           if (a.sessionId === undefined) throw new Error('interactive_shell kill requires sessionId')
@@ -606,6 +697,10 @@ export function apply(ctx: Context, config: Config): () => void {
             state.watcherDispose?.()
             state.watcherDispose = attachFileWatch(state, a.watch)
           }
+          // Zero-wait instant check if trigger was updated
+          if (state.trigger !== undefined) {
+            pollMonitor(state)
+          }
           return {
             sessionId: a.sessionId,
             text: `monitoring for ${state.trigger ? `/${state.trigger}/` : ''}${state.watch ? ` watch:${state.watch}` : ''}`.trim(),
@@ -630,7 +725,7 @@ export function apply(ctx: Context, config: Config): () => void {
     const disposeTool = ctx.tools.register(tool)
     return () => {
       disposeTool()
-      for (const poller of pollers) clearInterval(poller)
+      for (const stop of pollers) stop()
       pollers.clear()
       for (const state of sessions.values()) {
         state.watcherDispose?.()
@@ -642,7 +737,7 @@ export function apply(ctx: Context, config: Config): () => void {
 
   // Return the effect disposer so callers (and tests) can stop polling.
   return () => {
-    for (const poller of pollers) clearInterval(poller)
+    for (const stop of pollers) stop()
     pollers.clear()
     for (const state of sessions.values()) {
       state.watcherDispose?.()

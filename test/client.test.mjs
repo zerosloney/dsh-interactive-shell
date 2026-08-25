@@ -29,6 +29,25 @@ test('VirtualTerminalBuffer: tracks plain text lines and respects max scrollback
   buf.clear()
   assert.equal(buf.getLines().length, 0)
   assert.equal(buf.getText(), '')
+
+  // Carriage return overwrite test
+  const crBuf = new VirtualTerminalBuffer(10)
+  crBuf.append('Downloading: [==>        ] 20%')
+  crBuf.append('\rDownloading: [=====>     ] 50%\n')
+  crBuf.append('Status: Pending\rStatus: Ready\n')
+  assert.deepEqual(crBuf.getLines(), [
+    'Downloading: [=====>     ] 50%',
+    'Status: Ready',
+  ])
+
+  // Full-screen erase test (\x1B[2J)
+  const clearBuf = new VirtualTerminalBuffer(10)
+  clearBuf.append('Old console output 1\nOld console output 2\n')
+  clearBuf.append('\x1B[2J\x1B[HWelcome to Vim\n:set number\n')
+  assert.deepEqual(clearBuf.getLines(), [
+    'Welcome to Vim',
+    ':set number',
+  ])
 })
 
 test('TermStreamClient: initializes and transitions state through stream frames', () => {
@@ -207,6 +226,96 @@ test('TermStreamClient: connectHub binds directly to StreamHub', () => {
   assert.equal(client.getState().command, 'htop')
   assert.match(client.getBuffer().getText(), /CPU \[\|\|\|\|\|\| 50%\]/)
 
+  client.dispose()
+  hub.dispose()
+})
+
+test('TermStreamClient: error resilience with failing renderers and listener cleanup', () => {
+  const client = new TermStreamClient('s1')
+
+  // Failing renderer
+  const detachRenderer = client.attachRenderer({
+    write: () => {
+      throw new Error('Renderer crashed')
+    },
+  })
+
+  // Failing state & output listeners
+  const unsubState = client.onStateChange(() => {
+    throw new Error('State subscriber crashed')
+  })
+  const unsubOutput = client.onOutput(() => {
+    throw new Error('Output subscriber crashed')
+  })
+
+  // Ignore frame for another session
+  client.handleFrame({
+    type: 'term:init',
+    sessionId: 'other_session',
+    command: 'vim',
+    mode: 'interactive',
+    time: 100,
+  })
+  assert.equal(client.getState().command, '')
+
+  // Frame for this session dispatches safely despite throwers
+  client.handleFrame({
+    type: 'term:output',
+    sessionId: 's1',
+    chunk: 'safe output chunk\n',
+    lineBegin: 0,
+    lineEnd: 1,
+    time: 105,
+  })
+  assert.equal(client.getBuffer().getLines()[0], 'safe output chunk')
+
+  // Detach and verify clean state
+  detachRenderer()
+  unsubState()
+  unsubOutput()
+  client.dispose()
+})
+
+test('TermStreamClient: onOutput stream, custom events, and takeover via connectHub', () => {
+  const hub = new StreamHub()
+  const client = new TermStreamClient('takeover_s1')
+  client.connectHub(hub)
+
+  const chunks = []
+  const unsubOut = client.onOutput((c) => chunks.push(c))
+
+  // 1. requestTakeover
+  client.requestTakeover('carol')
+  assert.equal(hub.getLockState('takeover_s1').state, 'user_takeover')
+  assert.equal(hub.getLockState('takeover_s1').lockedBy, 'carol')
+
+  // 2. Custom event frame
+  client.handleFrame({
+    type: 'term:event',
+    sessionId: 'takeover_s1',
+    event: 'file-changed',
+    payload: { path: 'src/app.ts' },
+    time: 200,
+  })
+  assert.equal(client.getState().lastEvent, 'file-changed')
+
+  // 3. Output stream forwarding
+  hub.broadcast({
+    type: 'term:output',
+    sessionId: 'takeover_s1',
+    chunk: 'output piece 1',
+    lineBegin: 0,
+    lineEnd: 0,
+    time: 210,
+  })
+  assert.equal(chunks.length, 1)
+  assert.equal(chunks[0], 'output piece 1')
+
+  // 4. releaseTakeover
+  client.releaseTakeover('completed edits')
+  assert.equal(hub.getLockState('takeover_s1').state, 'agent_driving')
+
+  unsubOut()
   client.dispose()
   hub.dispose()
 })

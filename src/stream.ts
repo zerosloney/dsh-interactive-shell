@@ -114,6 +114,13 @@ export class StreamHub {
   }
 
   /**
+   * Alias for subscribeAll: subscribe to all broadcast stream frames.
+   */
+  onFrame(listener: TermStreamListener): () => void {
+    return this.subscribeAll(listener)
+  }
+
+  /**
    * Subscribe to stream frames for a specific session ID, and optionally replay recent history frames.
    * @param sessionId Target session ID.
    * @param listener Callback for each frame.

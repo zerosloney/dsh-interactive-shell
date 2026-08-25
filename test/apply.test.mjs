@@ -110,6 +110,26 @@ test('attach-monitor 设置的 trigger 能真正触发 monitor-triggered（P0: �
   stop()
 })
 
+test('attach-monitor 瞬时零等待即检：挂载瞬间若已有命中内容立即触发无需等待 tick', async () => {
+  const { ctx, registered, stop, terminals } = makeCtx()
+  const tool = registered[0]
+  const exec = { signal: new AbortController().signal, agent: { id: 'agent-1' } }
+  const events = []
+  ctx.on('interactive-shell/monitor-triggered', (payload) => events.push(payload))
+
+  const spawned = await tool.execute({ action: 'spawn', command: 'node server.js', mode: 'interactive' }, exec)
+  terminals.setOutput('Server started on port 3000\n')
+
+  // attach-monitor 挂载瞬间，执行第 0 次零等待探测
+  await tool.execute({ action: 'attach-monitor', sessionId: spawned.sessionId, trigger: 'Server started' }, exec)
+
+  // 验证无需等待 500ms 即刻触发
+  assert.equal(events.length, 1)
+  assert.equal(events[0].trigger, 'Server started')
+  assert.match(events[0].tail, /port 3000/)
+  stop()
+})
+
 test('dispatch 静默窗：持续输出不完成，静默后完成（P0: 原实现 lastOutputAt 恒等于 now 导致静默窗架空）', async () => {
   const { ctx, registered, stop, terminals } = makeCtx({ dispatchQuietMs: 300 })
   const tool = registered[0]

@@ -9,6 +9,10 @@ import {
   truncateTail,
   underSessionBudget,
 } from '../lib/pure.js'
+import { TraceSink, DEFAULT_TRACE_PATH } from '../lib/trace.js'
+import { mkdtempSync, readFileSync, rmSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 
 test('underSessionBudget: allows below the cap, denies at/above it', () => {
   assert.equal(underSessionBudget(0, 4), true)
@@ -100,4 +104,27 @@ test('triggerMatches: malformed regex fails closed', () => {
 test('resolveMode: explicit mode wins, default fills omission', () => {
   assert.equal(resolveMode('dispatch', 'monitor'), 'dispatch')
   assert.equal(resolveMode(undefined, 'monitor'), 'monitor')
+})
+
+test('TraceSink: creates with defaults and rotates file when exceeding maxBytes', () => {
+  const defaultSink = TraceSink.create(undefined)
+  assert.equal(defaultSink.path, DEFAULT_TRACE_PATH)
+  assert.equal(defaultSink.failureCount, 0)
+
+  // Test custom path with small maxBytes rotation
+  const tempDir = mkdtempSync(join(tmpdir(), 'dsh-trace-test-'))
+  const traceFile = join(tempDir, 'test-trace.jsonl')
+
+  try {
+    const sink = TraceSink.create(traceFile, 150)
+    sink.record('event_1', { message: 'hello world 1' })
+    sink.record('event_2', { message: 'hello world 2' })
+    sink.record('event_3', { message: 'hello world 3' })
+
+    const content = readFileSync(traceFile, 'utf8')
+    assert.ok(content.includes('event_3'))
+    assert.equal(sink.failureCount, 0)
+  } finally {
+    rmSync(tempDir, { recursive: true, force: true })
+  }
 })

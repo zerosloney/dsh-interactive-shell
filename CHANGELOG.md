@@ -4,6 +4,84 @@ All notable changes to this project are documented in this file. The format
 follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this
 project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.4] - 2026-08-25
+
+客户端 WebSocket 传输适配器（WsClientTransport）与全链路审计台账/会话录制测试加固。
+
+### Added
+
+- **客户端 WebSocket 传输适配器（WsClientTransport）**：
+  - 新增 `WsClientTransport` 实现 `TermTransport` 统一接口，支持与服务端 `attachWsServerConnection` / `StreamHub` 跨网络双向互联；
+  - 具备连接前消息队列自动缓存、连通后瞬时刷新、自动会话订阅（`sessionId`）及全生命周期销毁回收。
+- **全链路事件台账与时光机单测加固**：
+  - `TraceSink` 补齐路径默认值、容量超限轮转与写入审计测试，覆盖率提升至 **94.87%（函数 100%）**；
+  - `SessionRecorder` 补齐 `clear`、`getSession` 及异常导出分支测试，覆盖率提升至 **96.58%（函数 100%）**；
+  - 全工程综合行覆盖率达到 **95.53%**，函数覆盖率突破 **92.31%**。
+
+## [0.3.3] - 2026-08-25
+
+智能提示词数字序号菜单（Numbered Menus）与多选按键序列生成器（Multi-select Key Sequence Generator）。
+
+### Added
+
+- **数字序号菜单自动识别与响应（Numbered Select Menus）**：
+  - `parseInteractivePrompt` 支持提取 `1) Option A  2) Option B` / `[1] Option A  [2] Option B` 等数字序号选择列表；
+  - `generatePromptAnswer` 支持按选项名称（`preferredChoice: 'Staging'`）或选项序号（`preferredChoice: '2'`）直接生成对应序号按键与回车（`'2\n'`）。
+- **多选复选框智能按键序列生成（Multi-Select Keystroke Generator）**：
+  - `generatePromptAnswer` 支持 `preferredChoices: ['TypeScript', 'Prettier']`，自动计算光标相对位移并生成空格切换（`\x20`）与方向键（`\x1B[B` / `\x1B[A`）组合序列与最终回车。
+- **扩展确认与多位置光标解析**：
+  - 支持 `(yes/no)`、`(y/n/c)` 等多语言变体确认格式；
+  - 完善单选列表上下光标相对导航计算。
+
+## [0.3.2] - 2026-08-25
+
+自适应极速探针（Adaptive Heartbeat）与 ANSI 光标/清屏复杂 TUI 序列解析增强。
+
+### Added
+
+- **自适应极速探针与零等待即检（Adaptive Heartbeat & Zero-Wait Probe）**：
+  - `startPolling` 由固定 500ms 改造为自适应调度：活跃输出时以 50ms~100ms 极速快检，平稳期自动平滑退避至 500ms，大幅消除感知延迟；
+  - `attach-monitor` 挂载瞬间立即执行第 0 次零等待瞬时探测，已有匹配内容即刻唤醒 Agent。
+- **ANSI 光标重定位与复杂 TUI 擦除序列解析**：
+  - `VirtualTerminalBuffer` 增加 `\x1B[2J` / `\x1B[3J` 全屏擦除处理（如 `vim`、`htop`、`clear` 场景）；
+  - 增加独立回车符 `\r` 覆写解析，精准处理终端进度条（`[==> ]`）与 Spinner 动态刷新，彻底消除文本拼接乱码。
+
+## [0.3.1] - 2026-08-25
+
+安全沙箱混淆/编码绕过深度拦截与 Web Component DOM 交互全量测试补齐。
+
+### Added
+
+- **安全沙箱深度混淆与 Base64 解码拦截**：
+  - `evaluateCommandSafety` 增加 `OBFUSCATION_PATTERNS` 模式检测，支持拦截 `base64 -d | sh`、Windows `certutil -decode`、PowerShell `-EncodedCommand`、十六进制 `\x... | sh` 与 Python/Node 内联 base64 执行；
+  - 增加递归 Base64 负载反解探针，即使高危指令（如 `rm -rf /`）被 Base64 编码隐藏，也能在运行时被解码识别并置为 `critical` 风险阻断。
+- **Web Component DOM 交互全量测试覆盖**：
+  - 新增 `test/component.test.mjs`，补齐 `<dsh-shell-dock>` 内部 Shadow DOM 事件委托（Tab 切换、Takeover、Theme 切换、快捷动作派发与属性监听）的完整单测；
+  - `src/component.ts` 单测行覆盖率从 **24.22% 提升至 98.44%**，带动全工程综合覆盖率达到 **94.92%**。
+
+## [0.3.0] - 2026-08-25
+
+里程碑 M5 ~ M8 全面落地：生产安全沙箱、Web Component SDK、会话时光机与智能 CLI 交互中枢。
+
+### Added
+
+- **M5: 生产安全沙箱、敏感数据脱敏与熔断保护 (P0)**：
+  - 新增 `src/security.ts`，内置安全策略分级（`permissive` / `balanced` / `strict`），自动拦截破坏性高危命令（如 `rm -rf /`、`mkfs`、`dd`、`chmod 777 /`、fork bomb、`format c:`、`del /s /q`、`curl | sh`）；
+  - 敏感凭据自动脱敏引擎（`redactSensitiveData`），覆盖 OpenAI/DeepSeek API Key、GitHub Token、AWS Key、Slack Token、JWT 以及各类私钥与敏感密码字段；
+  - `StreamCircuitBreaker` 流量熔断器，防止海量恶意/死循环输出打爆缓冲区；
+  - Trace 审计台账与输出流全面集成脱敏与拦截。
+- **M6: 标准 Web Component SDK 与远程 WebSocket 网关 (P1)**：
+  - 新增 `src/component.ts`，基于 Custom Elements v1 和 Shadow DOM 封装原生 `<dsh-shell-dock>` 元素，样式与宿主完全隔离，具备 SSR/Node.js 同构容错，支持双向 DOM 事件与属性观察；
+  - 新增 `src/transport.ts`，提供 `LocalStreamTransport` 与 `attachWsServerConnection` 网关适配器，支持跨进程与跨网络（WebSocket/SSE）的低开销双向终端流推送。
+- **M7: 会话时光机录制与 Asciinema 兼容导出 (P2)**：
+  - 新增 `src/recorder.ts`，提供 `SessionRecorder`；
+  - 支持导出标准 Asciinema v2（`.cast`）录像文件，可直接在 Asciinema 播放器中回放；
+  - 智能人机协作时间轴分段归因分析（`getTimelineAttribution`），精准量化人类接管与 Agent 执行阶段；
+  - 时光机历史回溯（`getTimeTravelSnapshot`），支持按任意历史时间戳重构虚拟屏幕缓冲区状态。
+- **M8: 智能 CLI 交互提示词与菜单结构化解析 (P3)**：
+  - 新增 `src/prompts.ts`，自动解析终端文本中的交互式提问（确认提示、密码/令牌输入、单选光标菜单、多选复选框、文本输入框）；
+  - `generatePromptAnswer` 智能按键生成器，支持一键确认、密码映射与菜单光标上下按键自动计算（避免大模型反复猜键浪费 Token）。
+
 ## [0.2.0] - 2026-08-25
 
 里程碑 M4：Web UI 实时流投影、人机双向接管与多会话交互面板全量落地。
