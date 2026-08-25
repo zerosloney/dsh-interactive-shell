@@ -43,6 +43,8 @@ export declare class VirtualTerminalBuffer {
     private plainLines;
     private readonly maxLines;
     constructor(maxLines?: number);
+    /** Write an output chunk into the buffer (alias for append). */
+    write(chunk: string): void;
     /** Append an output chunk into the buffer. */
     append(chunk: string): void;
     /** Get all plain text lines. */
@@ -110,7 +112,7 @@ export declare class TermStreamClient {
     /**
      * Release takeover back to agent driving.
      */
-    releaseTakeover(): void;
+    releaseTakeover(summary?: string): void;
     /** Subscribe to state change notifications. */
     onStateChange(listener: (state: Readonly<ClientSessionState>) => void): () => void;
     /** Subscribe to raw output chunks. */

@@ -63,6 +63,11 @@ export class VirtualTerminalBuffer {
     this.maxLines = maxLines
   }
 
+  /** Write an output chunk into the buffer (alias for append). */
+  write(chunk: string): void {
+    this.append(chunk)
+  }
+
   /** Append an output chunk into the buffer. */
   append(chunk: string): void {
     this.rawChunks.push(chunk)
@@ -324,8 +329,8 @@ export class TermStreamClient {
   /**
    * Release takeover back to agent driving.
    */
-  releaseTakeover(): void {
-    this.onLockRequest?.(this.sessionId, 'release')
+  releaseTakeover(summary?: string): void {
+    this.onLockRequest?.(this.sessionId, 'release', summary)
   }
 
   /** Subscribe to state change notifications. */
@@ -347,9 +352,9 @@ export class TermStreamClient {
   connectHub(hub: StreamHub, replay = true): () => void {
     this.streamDisposer?.()
     const unsub = hub.subscribe(this.sessionId, (frame) => this.handleFrame(frame), replay)
-    this.onLockRequest = (sessionId, action, user) => {
-      if (action === 'acquire') hub.acquireLock(sessionId, user)
-      else hub.releaseLock(sessionId)
+    this.onLockRequest = (sessionId, action, userOrSummary) => {
+      if (action === 'acquire') hub.acquireLock(sessionId, userOrSummary)
+      else hub.releaseLock(sessionId, userOrSummary)
     }
     this.onSendInput = (sessionId, input) => {
       hub.sendUserInput(sessionId, input).catch(() => {})

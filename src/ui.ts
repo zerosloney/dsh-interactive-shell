@@ -136,7 +136,7 @@ export class DshShellPanelController {
       client.requestTakeover(this.operator)
       return true
     } else {
-      client.releaseTakeover()
+      client.releaseTakeover(note)
       return false
     }
   }
