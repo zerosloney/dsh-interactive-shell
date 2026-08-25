@@ -1,0 +1,24 @@
+# dsh-interactive-shell bundle patch: inserts the interactive-shell bridge
+# into any profile that lists this package in `dsh.profile.bundles`.
+# Rides the host's ctx.terminals seam — the base bundle's terminal-bash row
+# provides the PTY backend (readiness detection, sandbox composition, bounded
+# scrollback). This patch inserts only the bridge and ships no backend itself.
+- insert:
+    - id: interactive-shell
+      name: 'dsh-interactive-shell'
+      config:
+        # Default mode for a spawned session when the tool call omits one.
+        # monitor = event-driven wake-up, zero polling between triggers.
+        defaultMode: monitor
+        # Upper bound on concurrently live sessions per agent.
+        maxSessions: 4
+        # Bytes of output tail returned to the model per event/wake-up.
+        outputTailBytes: 4096
+        # Dispatch mode: window of output silence that completes a run.
+        dispatchQuietMs: 5000
+        # Dispatch mode: absolute deadline before forced completion.
+        dispatchTimeoutMs: 600000
+        # Monitor mode: minimum spacing between two trigger wake-ups.
+        monitorCooldownMs: 2000
+        # Monitor mode: per-monitor event budget before auto-detach.
+        monitorMaxEvents: 100
