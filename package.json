@@ -4,6 +4,14 @@
   "description": "Interactive shell bridge for DeepSeek Harness: the agent drives real interactive CLIs (vim/psql/ssh/dev servers) over the ctx.terminals PTY seam in Monitor/Dispatch modes with live Web UI stream overlay and bidirectional human takeover. Port of pi-interactive-shell.",
   "license": "MIT",
   "type": "module",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/zerosloney/dsh-interactive-shell.git"
+  },
+  "homepage": "https://github.com/zerosloney/dsh-interactive-shell#readme",
+  "publishConfig": {
+    "access": "public"
+  },
   "files": [
     "lib/",
     "cordis.patch.yml",
