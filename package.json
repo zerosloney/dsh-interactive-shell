@@ -6,7 +6,7 @@
   "type": "module",
   "repository": {
     "type": "git",
-    "url": "https://github.com/zerosloney/dsh-interactive-shell.git"
+    "url": "git+https://github.com/zerosloney/dsh-interactive-shell.git"
   },
   "homepage": "https://github.com/zerosloney/dsh-interactive-shell#readme",
   "publishConfig": {
