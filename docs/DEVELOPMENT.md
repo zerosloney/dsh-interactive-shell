@@ -34,7 +34,13 @@ node --experimental-test-coverage --test "test/*.test.mjs"
 
 GitHub Actions：CI（`ci.yml`）保留，lint + 单测 + 覆盖率门禁仍在 GitHub 上
 执行；发布流水线（`publish.yml`）已删除，`npm publish` 全程在本机完成，无需
-仓库配置 `NPM_TOKEN` secret。先 `npm login` 登录 npm 账号，再运行：
+仓库配置 `NPM_TOKEN` secret。发布源已固定为官方 registry：
+`package.json` 的 `publishConfig.registry` 指向 `https://registry.npmjs.org/`
+（`npm install` 仍走本机 `.npmrc` 的 npmmirror 镜像）。本机认证二选一：
+- 设置环境变量 `NPM_TOKEN`（`.npmrc` 已配置 `//registry.npmjs.org/:_authToken=${NPM_TOKEN}`）；
+- 或执行 `npm login --registry https://registry.npmjs.org/`。
+
+然后运行：
 
 ```bash
 npm run release              # 默认 patch 递增（0.3.4 → 0.3.5）并完整发布

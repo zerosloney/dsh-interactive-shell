@@ -16,6 +16,9 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   并完成 git 提交、`vX.Y.Z` 注解 tag、推送与 `npm publish`，不再依赖
   `NPM_TOKEN` secret 与 `v*` tag 触发；支持 `--dry-run` / `--skip-publish` /
   `--skip-git` / `--gh-release` 控制各环节。
+- **发布源固定与镜像下载并行**：`publishConfig.registry` 固定指向
+  `https://registry.npmjs.org/`（`.npmrc` 同步配置 `//registry.npmjs.org/:_authToken=${NPM_TOKEN}`
+  环境变量凭证），`npm publish` 始终发往官方源，`npm install` 继续走 npmmirror 镜像。
 
 ## [0.3.4] - 2026-08-25
 

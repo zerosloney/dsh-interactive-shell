@@ -10,7 +10,8 @@
   },
   "homepage": "https://github.com/zerosloney/dsh-interactive-shell#readme",
   "publishConfig": {
-    "access": "public"
+    "access": "public",
+    "registry": "https://registry.npmjs.org/"
   },
   "files": [
     "lib/",
