@@ -39,7 +39,9 @@
     "typecheck": "tsc --noEmit -p tsconfig.json",
     "test": "npm run build && node --test",
     "prepack": "npm run build",
-    "lint": "oxlint src test"
+    "lint": "oxlint src test",
+    "release": "node scripts/release.mjs",
+    "release:dry-run": "node scripts/release.mjs --dry-run"
   },
   "dependencies": {
     "@deepseek-ai/schemastery": "^3.18.1-rc.1"

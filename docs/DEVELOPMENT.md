@@ -9,8 +9,10 @@
 | `npm install` | 安装依赖（含 devDependencies） |
 | `npm run build` | tsc 构建到 `lib/`（发布前自动执行，见 `prepack`） |
 | `npm run typecheck` | 类型检查（tsc --noEmit） |
-| `npm run lint` | oxlint 静态检查（CI 门禁，0 警告 0 错误） |
+| `npm run lint` | oxlint 静态检查（CI 与发布双门禁，0 警告 0 错误） |
 | `npm test` | 构建 + node:test 全量测试 |
+| `npm run release` | 本机一键发布：lint → 测试 → 覆盖率 → 打包 → tag → 推送 → npm publish（见"发布流程"） |
+| `npm run release:dry-run` | 发布预览：门禁 + 打包清单，不修改任何文件 |
 | `node --experimental-test-coverage --test "test/*.test.mjs"` | 覆盖率报告（v8，见下方"覆盖率"一节） |
 | `npm pack` | 产出可分发 tarball（含版本号，`docs/packages/`） |
 
@@ -28,12 +30,38 @@ node --experimental-test-coverage --test "test/*.test.mjs"
 - `src/trace.ts` —— JSONL 事件台账（best-effort，永不抛错）；
 - `cordis.patch.yml` —— bundle 插入清单（配置项与 `Config` schema 一一对应）。
 
-## 发布流程
+## 发布流程（本机发布）
 
-1. `CHANGELOG.md` 记录变更；`package.json` 版本号递增（semver）；
-2. 打 tag 推送：`git tag v0.1.0 && git push origin v0.1.0`；
-3. GitHub Actions `publish.yml` 监听 `v*` tag：lint + test 通过后 `npm publish`
-   （需仓库配置 `NPM_TOKEN` secret，environment: npm）。
+GitHub Actions：CI（`ci.yml`）保留，lint + 单测 + 覆盖率门禁仍在 GitHub 上
+执行；发布流水线（`publish.yml`）已删除，`npm publish` 全程在本机完成，无需
+仓库配置 `NPM_TOKEN` secret。先 `npm login` 登录 npm 账号，再运行：
+
+```bash
+npm run release              # 默认 patch 递增（0.3.4 → 0.3.5）并完整发布
+npm run release -- minor     # minor 递增（0.3.4 → 0.4.0）
+node scripts/release.mjs 0.4.0   # 直接指定目标版本
+npm run release:dry-run      # 预览：门禁 + 打包清单，不改动任何文件
+```
+
+`scripts/release.mjs` 按序执行：
+
+1. **门禁**：复跑与 GitHub CI 相同的 `npm run lint` → `npm test`（构建 + node:test 全量）→ 覆盖率报告；
+2. **版本递增**：按参数将 `package.json` 与 `package-lock.json` 版本号递增（semver）；
+3. **打包**：`npm pack` 产出 `docs/packages/dsh-interactive-shell-<version>.tgz`
+   （`prepack` 自动构建）；
+4. **git 发布**：要求工作区干净，提交全部改动、打注解 tag `vX.Y.Z`、
+   推送分支与 tag；
+5. **npm 发布**：`npm publish --access public`；
+6. **（可选）GitHub Release**：加 `--gh-release` 时调用 `gh` CLI 生成 Release。
+
+可选开关：
+
+| 开关 | 说明 |
+| --- | --- |
+| `--dry-run` | 只跑门禁与 `npm pack --dry-run` 清单预览，不修改任何文件 |
+| `--skip-publish` | 完成门禁、打包与 git 提交/tag/推送，跳过 `npm publish` |
+| `--skip-git` | 跳过 git 提交/tag/推送（版本号与 tag 自行处理），仅执行门禁、打包与发布 |
+| `--gh-release` | 发布成功后额外用 `gh` CLI 创建 GitHub Release（需安装并登录 [GitHub CLI](https://cli.github.com)） |
 
 ## 已知约束
 

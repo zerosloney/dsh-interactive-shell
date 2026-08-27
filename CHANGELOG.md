@@ -4,6 +4,19 @@ All notable changes to this project are documented in this file. The format
 follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this
 project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Changed
+
+- **发布流程改为本机执行，保留 GitHub CI**：保留 `.github/workflows/ci.yml`
+  （lint + 单测 + 覆盖率门禁仍由 GitHub Actions 执行），删除发布流水线
+  `.github/workflows/publish.yml`，新增 `scripts/release.mjs` 本地一键发布
+  脚本（`npm run release`）。发布前在本机复跑与 CI 相同的门禁
+  （lint + 单测 + 覆盖率），随后递增版本、产出 tarball 至 `docs/packages/`，
+  并完成 git 提交、`vX.Y.Z` 注解 tag、推送与 `npm publish`，不再依赖
+  `NPM_TOKEN` secret 与 `v*` tag 触发；支持 `--dry-run` / `--skip-publish` /
+  `--skip-git` / `--gh-release` 控制各环节。
+
 ## [0.3.4] - 2026-08-25
 
 客户端 WebSocket 传输适配器（WsClientTransport）与全链路审计台账/会话录制测试加固。
