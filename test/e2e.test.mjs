@@ -8,15 +8,18 @@ import {
   renderShellPanelHtml,
 } from '../lib/index.js'
 
+/**
+ * Faithful terminals seam double (same contract as `apply.test.mjs`): shared
+ * scrollback appended by `setOutput()`, with `read()` implementing the shipped
+ * newest-relative offset / `totalLines` paging.
+ */
 function fakeTerminals() {
   let seq = 0
   const sessions = new Map()
-  let output = ''
-  let line = 0
+  let buffer = ''
   return {
     setOutput(text) {
-      output = text
-      line += 1
+      buffer += text
     },
     list: () => [...sessions.values()],
     spawn: async () => {
@@ -27,19 +30,31 @@ function fakeTerminals() {
     },
     startSend: (_agent, _id, options) => {
       if (options?.text) {
-        output += options.text
-        line += 1
+        buffer += options.text
       }
       return {
         done: Promise.resolve({
-          viewport: output,
+          viewport: buffer,
           waitReason: 'ready',
           sessionStatus: { kind: 'running' },
           truncated: false,
         }),
       }
     },
-    read: () => ({ text: output, totalLines: line, lineBegin: 0, lineEnd: line, truncated: false }),
+    read: (_agent, _id, request = {}) => {
+      const offset = request.offset ?? 0
+      const count = request.count ?? 500
+      const lines = buffer.length === 0 ? [] : buffer.split('\n')
+      const totalLines = lines.length
+      if (offset >= totalLines) {
+        return { text: '', totalLines, lineBegin: offset, lineEnd: offset, truncated: false }
+      }
+      const end = totalLines - offset
+      const start = Math.max(0, end - count)
+      const text = lines.slice(start, end).join('\n')
+      const returnedLines = text.length === 0 ? 0 : text.split('\n').length
+      return { text, totalLines, lineBegin: offset, lineEnd: offset + returnedLines, truncated: false }
+    },
     signal: async () => ({ processGroupId: 1 }),
     kill: async () => true,
   }

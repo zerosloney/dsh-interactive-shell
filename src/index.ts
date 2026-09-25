@@ -20,9 +20,11 @@ import { watch } from 'node:fs'
 import type { Context } from '@deepseek-ai/cordis'
 import z from '@deepseek-ai/schemastery'
 import type { Agent } from '@deepseek-ai/dsh-agent'
-import { createUserMessage } from '@deepseek-ai/dsh-llm'
+import { boundContextSummary, createUserMessage } from '@deepseek-ai/dsh-llm'
+import type { ContextFormed } from '@deepseek-ai/dsh-llm'
 import { TerminalSessionId, TerminalSessionService } from '@deepseek-ai/dsh-terminal'
 import type { ToolDefinition } from '@deepseek-ai/dsh-tools'
+import { defineTool } from '@deepseek-ai/dsh-tools'
 import {
   dispatchCompleted,
   monitorBudgetExhausted,
@@ -33,6 +35,7 @@ import {
   underSessionBudget,
 } from './pure.js'
 import type { ShellMode, ShellToolArgs } from './pure.js'
+import { NO_AGENT_MESSAGE, PTY_UNAVAILABLE_MESSAGE, requireTerminals } from './seam.js'
 import { TraceSink } from './trace.js'
 import { StreamHub } from './stream.js'
 import type { TermFrame } from './stream.js'
@@ -46,7 +49,7 @@ export * from './transport.js'
 export * from './recorder.js'
 export * from './prompts.js'
 
-import { evaluateCommandSafety, redactSensitiveData } from './security.js'
+import { evaluateCommandSafety, redactSensitiveData, StreamCircuitBreaker } from './security.js'
 import type { SecurityPolicyLevel } from './security.js'
 
 /** Cordis plugin name used by loader diagnostics. */
@@ -69,8 +72,16 @@ export interface Config {
   dispatchTimeoutMs: number
   monitorCooldownMs: number
   monitorMaxEvents: number
-  /** JSONL 事件台账路径；空 = ~/.dsh-interactive-shell/traces.jsonl。 */
+  /** JSONL 事件台账路径；空 = `$DSH_HOME`/`~/.dsh` 下的 interactive-shell/traces.jsonl。 */
   tracePath: string
+  /**
+   * Registered PTY backend type for new sessions (`terminal-bash.backendType`,
+   * default `shell`). Omitted rows fall back in code because a directly
+   * applied config carries no schema defaults.
+   */
+  backendType?: string
+  /** Output bytes/second mirrored to stream clients before frames are throttled (default 512 KB/s). */
+  maxOutputBytesPerSec?: number
   /** Global security policy level ('permissive' | 'balanced' | 'strict'). */
   securityPolicy?: SecurityPolicyLevel
   /** List of command prefixes or regexes to block. */
@@ -95,6 +106,8 @@ export const Config = z.object({
   monitorCooldownMs: z.number().min(0).max(60000).default(2000),
   monitorMaxEvents: z.number().step(1).min(1).max(1000).default(100),
   tracePath: z.string().default(''),
+  backendType: z.string().min(1).default('shell'),
+  maxOutputBytesPerSec: z.number().step(1024).min(1024).max(67108864).default(524288),
   securityPolicy: z.union([z.const('permissive'), z.const('balanced'), z.const('strict')]).default('balanced'),
   blockedCommands: z.array(z.string()).default([]),
   allowedCommandsOnly: z.array(z.string()).default([]),
@@ -135,21 +148,51 @@ declare module '@deepseek-ai/cordis' {
   }
 }
 
+declare module '@deepseek-ai/dsh-llm' {
+  interface MessageSourceMap {
+    /**
+     * Wake-up notices this bridge injects into its owning agent's conversation.
+     *
+     * dsh 0.1.7 retired the catch-all `plugin` kind (session format v4 refuses
+     * it outright), so every producer declares its own kind here.
+     */
+    'interactive-shell': { kind: 'interactive-shell' } & ContextFormed
+  }
+}
+
 /** Per-session supervisor state owned by this bridge. */
 interface SessionState {
   sessionId: TerminalSessionId
   /** The agent that spawned this session; used for every seam call (owner-verified). */
   owner: Agent
+  /**
+   * The PTY registry this session lives in, resolved for `owner` at spawn.
+   * Since dsh 0.1.7 that registry is preset-scoped, so a session is only
+   * addressable through the instance its owner resolved.
+   */
+  term: TerminalSessionService
   mode: ShellMode
   command: string
+  /** Absolute dispatch deadline (ms): per-call `timeoutMs` when given, else `dispatchTimeoutMs`. */
+  timeoutMs: number
   /** Monitor trigger regex source; attach-monitor may (re)set it later. */
   trigger: string | undefined
   /** Monitor file watch target path. */
   watch: string | undefined
   /** Disposer for the attached file watcher (if any). */
   watcherDispose: (() => void) | undefined
-  /** Last output read offset (for tail deltas). */
-  lastRead: number
+  /**
+   * Retained-line cursor: how many scrollback lines this bridge has already
+   * delivered. `read()` offsets count backwards from the newest line, so the
+   * delta is derived from `totalLines` instead (see {@link readTail}).
+   */
+  seenTotal: number
+  /**
+   * Text of the last delivered line. A PTY that rewrites its current line
+   * (progress bar, spinner, prompt redraw) keeps `seenTotal` unchanged, so the
+   * rewrite is detected by comparing this value.
+   */
+  seenLastLine: string
   /** When the session last produced new output (dispatch quiet-window base). */
   lastOutputAt: number
   /** Last monitor wake-up timestamp (cooldown gate). */
@@ -164,6 +207,16 @@ interface SessionState {
   dispose: () => void
 }
 
+/** Lines requested when resynchronizing after the bounded scrollback was trimmed. */
+const DELTA_PAGE_LINES = 200
+
+/** Hard cap on lines one delta read may request (the backend still bounds bytes). */
+const DELTA_MAX_LINES = 2000
+
+/** Per-call dispatch deadline bounds, mirroring the `dispatchTimeoutMs` Config bounds. */
+const MIN_DISPATCH_TIMEOUT_MS = 1000
+const MAX_DISPATCH_TIMEOUT_MS = 3600000
+
 /**
  * Mount the interactive-shell bridge: register the single dispatch tool and
  * wire session lifecycle events.
@@ -172,20 +225,35 @@ interface SessionState {
  * @param config - resolved plugin configuration.
  */
 export function apply(ctx: Context, config: Config): () => void {
-  const terminals = ctx.get('terminals') as TerminalSessionService | undefined
-  if (terminals === undefined) {
-    // Honest degradation: no PTY backend mounted (e.g. headless), so the
-    // bridge registers no tool instead of failing the composition. The
-    // plugin activates and waits for an HMR reload with terminals present.
-    ctx.logger.info('interactive-shell: no terminals service mounted — tool not registered')
-    return () => {}
+  // Availability is per agent since dsh 0.1.7: the PTY family is mounted by an
+  // agent preset behind an isolate realm, so the host-plane row that mounts
+  // this bridge cannot know at load time whether any preset supplies one. The
+  // tool is therefore always registered and resolves the seam per call; a row
+  // that instead registered nothing would present a missing capability as a
+  // missing tool with no diagnostic.
+  if (ctx.get('terminals') === undefined && ctx.get('agentPresets') === undefined) {
+    ctx.logger.warn(`interactive-shell: no PTY seam in this composition — ${PTY_UNAVAILABLE_MESSAGE}`)
   }
-  // Non-null local for closures: the guard above settled presence, and
-  // TypeScript cannot narrow a captured variable across function boundaries.
-  const term = terminals
+
+  /**
+   * The exact calling agent of one tool call. Every PTY operation is
+   * owner-verified, so a call without an agent is refused here instead of
+   * being handed a synthetic owner.
+   *
+   * @param agent - the tool call's agent, when the caller supplied one.
+   * @returns the same agent, narrowed to a definite value.
+   */
+  function requireAgent(agent: Agent | undefined): Agent {
+    if (agent === undefined) throw new Error(NO_AGENT_MESSAGE)
+    return agent
+  }
 
   const sessions = new Map<string, SessionState>()
   const pollers = new Set<() => void>()
+  /** Session ids this bridge created; the `maxSessions` budget counts only these. */
+  const spawnedIds = new Set<string>()
+  /** Output mirror rate guard (M5): protects stream clients from PTY floods. */
+  const breaker = new StreamCircuitBreaker(config.maxOutputBytesPerSec ?? 512 * 1024)
   // 事件台账：关键生命周期与错误持久化，供运行回溯审计（最小收集：只记事件与摘要）。
   const trace = TraceSink.create(config.tracePath)
 
@@ -206,7 +274,7 @@ export function apply(ctx: Context, config: Config): () => void {
       if (state === undefined) {
         throw new Error(`interactive-shell: session ${sessionId} not found or not active`)
       }
-      const op = term.startSend(state.owner, TerminalSessionId(sessionId), {
+      const op = state.term.startSend(state.owner, state.sessionId, {
         text: input,
         submit: false,
       })
@@ -217,7 +285,7 @@ export function apply(ctx: Context, config: Config): () => void {
     onReleaseLock: (sessionId, summary) => {
       const state = sessions.get(sessionId)
       if (state === undefined) return
-      const tail = readTail(state)
+      const tail = truncateTail(readTail(state), config.outputTailBytes)
       wakeAgent(
         state.owner,
         `User released control of shell session ${sessionId}`,
@@ -243,10 +311,10 @@ export function apply(ctx: Context, config: Config): () => void {
       const wakeMsg = createUserMessage({
         content: [{ type: 'text', text: sanitizedText }],
         source: {
-          kind: 'plugin',
-          plugin: 'interactive-shell',
+          kind: 'interactive-shell',
           form: 'notice',
-          summary: sanitizedSummary,
+          // The durable log carries a bounded one-line account (dsh-llm bounds it).
+          summary: boundContextSummary(sanitizedSummary),
         },
       })
       owner.followup(wakeMsg)
@@ -305,64 +373,137 @@ export function apply(ctx: Context, config: Config): () => void {
   }
 
   /**
-   * Read the bounded tail of one session since the last read, using the
-   * owning agent (never a fabricated owner object) so the terminals seam's
-   * owner checks see the real caller.
+   * Read the raw output produced since the previous read for one session.
    *
-   * P1: Pass state.lastRead as offset to ensure pagination/cursor correctness.
-   * M4 Phase 1: Broadcast real-time chunk output frame to Web UI stream hub.
+   * `ctx.terminals.read()` pages scrollback with an offset counted *backwards*
+   * from the newest retained line, so `lineEnd` is not a forward cursor —
+   * feeding it back as `offset` re-reads older lines and drifts away from the
+   * newest output (the P0 defect this replaces). The delta is derived from
+   * `totalLines` instead:
+   *
+   * - more retained lines: deliver the lines past the delivered count, plus the
+   *   previously delivered line when the PTY completed that line in place;
+   * - same retained count and a different last line: the PTY rewrote its
+   *   current line (progress bar, spinner, prompt redraw), so deliver that line;
+   * - fewer retained lines, or a page that no longer reaches the delivered
+   *   cursor (bounded ring buffer, byte-bounded page): deliver the whole page.
+   *
+   * A successful read also refreshes the dispatch quiet-window base and
+   * broadcasts the real-time chunk frame to the Web UI stream hub.
+   *
+   * @param state - the session supervisor state holding the cursor.
+   * @returns the raw newly produced output; `''` when nothing changed. Callers truncate what reaches the model.
    */
   function readTail(state: SessionState): string {
-    const result = term.read(
-      state.owner,
-      TerminalSessionId(state.sessionId),
-      { count: 200, offset: state.lastRead },
-    )
-    state.lastRead = result.lineEnd
-    if (result.text.length > 0) {
-      state.lastOutputAt = Date.now()
-      streamHub.broadcast({
-        type: 'term:output',
-        sessionId: state.sessionId,
-        chunk: result.text,
-        lineBegin: result.lineBegin,
-        lineEnd: result.lineEnd,
-        time: Date.now(),
+    // The cheap head read yields the retained-line count and the current last
+    // line without materializing the scrollback.
+    const head = state.term.read(state.owner, state.sessionId, { offset: 0, count: 1 })
+    const lastLine = head.text
+    const pending = head.totalLines - state.seenTotal
+    let chunk = ''
+    let lineBegin = state.seenTotal
+    let lineEnd = head.totalLines
+
+    if (pending === 0) {
+      // No new line: only an in-place rewrite of the current line is possible.
+      if (lastLine !== state.seenLastLine) chunk = lastLine
+      lineBegin = Math.max(0, head.totalLines - 1)
+    } else if (pending > 0) {
+      const page = state.term.read(state.owner, state.sessionId, {
+        offset: 0,
+        count: Math.min(pending + 1, DELTA_MAX_LINES),
       })
+      const lines = page.text.length === 0 ? [] : page.text.split('\n')
+      // `totalLines - returnedLines` is the retained index of the page's first
+      // line, so the delivered cursor maps into the page by subtraction.
+      const firstIndex = Math.max(0, page.totalLines - lines.length)
+      const previousIndex = state.seenTotal - 1 - firstIndex
+      const previousUnchanged = previousIndex >= 0
+        && previousIndex < lines.length
+        && lines[previousIndex] === state.seenLastLine
+      const from = previousIndex < 0
+        ? 0
+        : previousUnchanged ? previousIndex + 1 : previousIndex
+      chunk = lines.slice(from).join('\n')
+      lineBegin = Math.max(0, firstIndex + from)
+      lineEnd = page.totalLines
+    } else {
+      // Retained scrollback shrank (bounded ring): resynchronize on the page.
+      const page = state.term.read(state.owner, state.sessionId, { offset: 0, count: DELTA_PAGE_LINES })
+      chunk = page.text
+      lineBegin = 0
+      lineEnd = page.totalLines
     }
-    return truncateTail(result.text, config.outputTailBytes)
+
+    state.seenLastLine = lastLine
+    state.seenTotal = Math.max(0, lineEnd)
+    if (chunk !== '') {
+      state.lastOutputAt = Date.now()
+      // M5 circuit breaker: the quiet-window base above always refreshes, but
+      // the *mirror* to stream clients is rate-limited so a runaway program
+      // cannot flood Web viewers (the model still gets the tail via read/status).
+      const verdict = breaker.check(Buffer.byteLength(chunk, 'utf8'))
+      if (verdict.allowed) {
+        streamHub.broadcast({
+          type: 'term:output',
+          sessionId: state.sessionId,
+          chunk,
+          lineBegin,
+          lineEnd,
+          time: Date.now(),
+        })
+      } else if (verdict.tripped) {
+        trace.record('output-throttled', {
+          sessionId: state.sessionId,
+          droppedBytes: verdict.droppedBytes,
+        })
+        streamHub.broadcast({
+          type: 'term:event',
+          sessionId: state.sessionId,
+          event: 'output-throttled',
+          payload: { droppedBytes: verdict.droppedBytes },
+          time: Date.now(),
+        })
+      }
+    }
+    return chunk
   }
 
   /** One dispatch poll: read new output first (refreshing the quiet-window
-   *  base), then detect quiet/exit/timeout completion and wake once. */
-  function pollDispatch(state: SessionState): void {
-    const snap = term.list(state.owner).find((s) => s.sessionId === state.sessionId)
+   *  base), then detect quiet/exit/timeout completion and wake once.
+   *  @param state - the dispatch session under supervision.
+   *  @returns whether this tick produced new output (drives adaptive polling).
+   */
+  function pollDispatch(state: SessionState): boolean {
+    const snap = state.term.list(state.owner).find((s) => s.sessionId === state.sessionId)
     const exited = snap?.status.kind === 'exited'
     // 先读增量再判定：readTail 在有新输出时刷新 lastOutputAt，静默窗的
     // 基准才真实。此前 readTail 只在完成路径调用，lastOutputAt 永远停在
     // spawn 时刻，第一次 tick 就误判完成（P0 fix 的补全）。
     const delta = readTail(state)
+    const hadOutput = delta !== ''
     const completed = dispatchCompleted({
       exited,
       lastOutputAt: state.lastOutputAt,
       quietMs: config.dispatchQuietMs,
       now: Date.now(),
-      timeoutMs: config.dispatchTimeoutMs,
+      timeoutMs: state.timeoutMs,
       startedAt: state.startedAt,
     })
-    if (!completed) return
+    if (!completed) return hadOutput
     const exitCode = snap?.status.kind === 'exited' ? snap.status.exitCode : null
+    const tail = truncateTail(delta, config.outputTailBytes)
     ctx.emit('interactive-shell/dispatch-completed', {
       sessionId: state.sessionId,
       exitCode,
-      tail: delta,
+      tail,
     })
     trace.record('dispatch-completed', { sessionId: state.sessionId, exitCode })
     streamHub.broadcast({
       type: 'term:event',
       sessionId: state.sessionId,
       event: 'dispatch-completed',
-      payload: { exitCode, tail: delta },
+      payload: { exitCode, tail },
       time: Date.now(),
     })
     if (exited) {
@@ -377,52 +518,90 @@ export function apply(ctx: Context, config: Config): () => void {
     wakeAgent(
       state.owner,
       `Shell session ${state.sessionId} completed (exitCode=${exitCode})`,
-      `[interactive_shell] Session ${state.sessionId} (${state.command}) completed (exitCode=${exitCode}).\n\nOutput tail:\n${delta}`,
+      `[interactive_shell] Session ${state.sessionId} (${state.command}) completed (exitCode=${exitCode}).\n\nOutput tail:\n${tail}`,
     )
     stopPolling(state)
     // 会话已结束：从本地登记表移除，避免长时间运行后堆积（P0 附修）。
     sessions.delete(state.sessionId)
+    return hadOutput
   }
 
-  /** One monitor poll: match new output against the state's trigger; cooldown + budget. */
-  function pollMonitor(state: SessionState): void {
+  /** Publish one monitor trigger: event, trace, stream frame, and one agent wake-up. */
+  function fireMonitor(state: SessionState, delta: string): void {
     if (state.trigger === undefined) return
-    const snap = term.list(state.owner).find((s) => s.sessionId === state.sessionId)
-    if (snap === undefined || snap.status.kind === 'exited') {
-      // 会话已退出：停止轮询并清理登记（P1 附修：原实现不清理）。
-      state.monitoring = false
-      sessions.delete(state.sessionId)
-      stopPolling(state)
-      return
-    }
-    if (monitorBudgetExhausted(state.eventsFired, config.monitorMaxEvents)) {
-      state.monitoring = false
-      return
-    }
-    if (!monitorCooldownElapsed(state.lastEventAt, Date.now(), config.monitorCooldownMs)) return
-    const delta = readTail(state)
-    if (delta === '' || !triggerMatches(state.trigger, delta)) return
+    const tail = truncateTail(delta, config.outputTailBytes)
     state.lastEventAt = Date.now()
     state.eventsFired += 1
     ctx.emit('interactive-shell/monitor-triggered', {
       sessionId: state.sessionId,
       trigger: state.trigger,
-      tail: delta,
+      tail,
     })
     trace.record('monitor-triggered', { sessionId: state.sessionId, trigger: state.trigger })
     streamHub.broadcast({
       type: 'term:event',
       sessionId: state.sessionId,
       event: 'monitor-triggered',
-      payload: { trigger: state.trigger, tail: delta },
+      payload: { trigger: state.trigger, tail },
       time: Date.now(),
     })
     // P0: 唤醒 Agent 对话回路
     wakeAgent(
       state.owner,
       `Shell session ${state.sessionId} triggered on /${state.trigger}/`,
-      `[interactive_shell] Session ${state.sessionId} (${state.command}) triggered on /${state.trigger}/.\n\nOutput tail:\n${delta}`,
+      `[interactive_shell] Session ${state.sessionId} (${state.command}) triggered on /${state.trigger}/.\n\nOutput tail:\n${tail}`,
     )
+  }
+
+  /** One monitor poll: match new output against the state's trigger; cooldown + budget.
+   *  @param state - the monitor session under supervision.
+   *  @returns whether this tick produced new output (drives adaptive polling).
+   */
+  function pollMonitor(state: SessionState): boolean {
+    if (state.trigger === undefined) return false
+    const snap = state.term.list(state.owner).find((s) => s.sessionId === state.sessionId)
+    if (snap === undefined || snap.status.kind === 'exited') {
+      // 会话已退出：停止轮询并清理登记（P1 附修：原实现不清理）。
+      state.monitoring = false
+      sessions.delete(state.sessionId)
+      stopPolling(state)
+      return false
+    }
+    if (monitorBudgetExhausted(state.eventsFired, config.monitorMaxEvents)) {
+      state.monitoring = false
+      return false
+    }
+    if (!monitorCooldownElapsed(state.lastEventAt, Date.now(), config.monitorCooldownMs)) return false
+    const delta = readTail(state)
+    if (delta === '') return false
+    // Match the raw delta, never the truncated model-facing tail: truncation
+    // drops the middle of a large delta and could hide the trigger line.
+    if (!triggerMatches(state.trigger, delta)) return true
+    fireMonitor(state, delta)
+    return true
+  }
+
+  /**
+   * Zero-wait monitor probe for `attach-monitor`: match the *current* page
+   * instead of the delta, so a trigger attached after the interesting line
+   * already scrolled still fires on the attach call, then resynchronize the
+   * cursor so later wake-ups only consider output produced after the probe.
+   * @param state - the session being attached to monitor mode.
+   */
+  function probeMonitor(state: SessionState): void {
+    if (state.trigger === undefined) return
+    const page = state.term.read(state.owner, state.sessionId, { offset: 0, count: DELTA_PAGE_LINES })
+    const lines = page.text.length === 0 ? [] : page.text.split('\n')
+    state.seenTotal = Math.max(0, page.totalLines)
+    state.seenLastLine = lines.length === 0 ? '' : lines[lines.length - 1] ?? ''
+    if (page.text === '') return
+    if (monitorBudgetExhausted(state.eventsFired, config.monitorMaxEvents)) {
+      state.monitoring = false
+      return
+    }
+    if (!monitorCooldownElapsed(state.lastEventAt, Date.now(), config.monitorCooldownMs)) return
+    if (!triggerMatches(state.trigger, page.text)) return
+    fireMonitor(state, page.text)
   }
 
   /** Wire an adaptive poller for one session mode; returns the stop function. */
@@ -436,15 +615,11 @@ export function apply(ctx: Context, config: Config): () => void {
 
       let hasActivity = false
       if (state.mode === 'dispatch') {
-        const prevRead = state.lastRead
-        pollDispatch(state)
+        hasActivity = pollDispatch(state)
         if (!sessions.has(state.sessionId)) return
-        hasActivity = state.lastRead > prevRead
       } else if (state.mode === 'monitor') {
-        const prevRead = state.lastRead
-        pollMonitor(state)
+        hasActivity = pollMonitor(state)
         if (!sessions.has(state.sessionId) || !state.monitoring) return
-        hasActivity = state.lastRead > prevRead
       }
 
       // Adaptive backoff: fast probe (100ms) when output is actively flowing,
@@ -481,7 +656,7 @@ export function apply(ctx: Context, config: Config): () => void {
     state.dispose()
   }
 
-  const tool: ToolDefinition = {
+  const tool: ToolDefinition = defineTool({
     name: 'interactive_shell',
     description:
       'Drive an interactive CLI (vim, psql, ssh, dev server) in a real PTY. ' +
@@ -491,38 +666,56 @@ export function apply(ctx: Context, config: Config): () => void {
       'Modes: interactive / hands-free / dispatch (wake once on completion) / ' +
       'monitor (wake on trigger only).',
     parameters: {
-      type: 'object',
-      properties: {
-        action: { type: 'string', enum: ['spawn', 'send', 'status', 'read', 'kill', 'attach-monitor'] },
-        command: { type: 'string' },
-        mode: { type: 'string', enum: ['interactive', 'hands-free', 'dispatch', 'monitor'] },
-        sessionId: { type: 'string' },
-        input: { type: 'string' },
-        submit: { type: 'boolean' },
-        trigger: { type: 'string' },
-        watch: { type: 'string' },
-        timeoutMs: { type: 'number' },
+      action: {
+        type: 'string',
+        required: true,
+        enum: ['spawn', 'send', 'status', 'read', 'kill', 'attach-monitor'],
+        description: 'Operation to perform on a PTY session.',
       },
-      required: ['action'],
+      command: { type: 'string', description: 'spawn: the command line to run in the new PTY session.' },
+      mode: {
+        type: 'string',
+        enum: ['interactive', 'hands-free', 'dispatch', 'monitor'],
+        description:
+          'spawn: how results come back. interactive = agent drives it; dispatch = one wake-up on exit, quiet window, or deadline; monitor = wake only when a trigger matches.',
+      },
+      sessionId: {
+        type: 'string',
+        description: 'send | status | read | kill | attach-monitor: the id returned by spawn.',
+      },
+      input: {
+        type: 'string',
+        description: 'send: text written to the PTY — keystrokes for an interactive program, a command line with submit=true.',
+      },
+      submit: { type: 'boolean', description: 'send: append the backend Enter sequence after input.' },
+      trigger: {
+        type: 'string',
+        description: 'spawn | attach-monitor: regex matched against new output; a match wakes the agent.',
+      },
+      watch: {
+        type: 'string',
+        description: 'spawn | attach-monitor: file path whose changes wake the agent.',
+      },
+      timeoutMs: {
+        type: 'integer',
+        description:
+          'spawn in dispatch mode: absolute deadline in ms for this run (1000-3600000). Defaults to the configured dispatchTimeoutMs.',
+      },
     },
     output: {
       schema: {
         type: 'object',
         properties: {
           sessionId: { type: 'string' },
-          text: { type: 'string' },
+          text: { type: 'string', required: true },
           exited: { type: 'boolean' },
         },
-        required: ['text'],
         additionalProperties: false,
       },
-      render(_args: unknown, value: unknown): { type: 'text'; text: string }[] {
-        const v = value as { text?: string }
-        return [{ type: 'text', text: v.text ?? '' }]
-      },
+      render: (_args, value) => [{ type: 'text', text: value.text }],
     },
-    async execute(args: unknown, exec) {
-      const a = (args ?? {}) as ShellToolArgs
+    async execute(args, exec) {
+      const a = args as ShellToolArgs
       const sanitizeOutput = (text: string): string =>
         config.redactSensitiveData !== false ? redactSensitiveData(text).text : text
 
@@ -531,6 +724,12 @@ export function apply(ctx: Context, config: Config): () => void {
         case 'spawn': {
           if (a.command === undefined || a.command === '') {
             throw new Error('interactive_shell spawn requires a command')
+          }
+          if (a.timeoutMs !== undefined
+            && (a.timeoutMs < MIN_DISPATCH_TIMEOUT_MS || a.timeoutMs > MAX_DISPATCH_TIMEOUT_MS)) {
+            throw new Error(
+              `interactive_shell timeoutMs must be between ${MIN_DISPATCH_TIMEOUT_MS} and ${MAX_DISPATCH_TIMEOUT_MS} ms`,
+            )
           }
           // M5: 生产安全沙箱与高危指令检查
           const safety = evaluateCommandSafety(a.command, {
@@ -544,7 +743,18 @@ export function apply(ctx: Context, config: Config): () => void {
             throw new Error(errorMsg)
           }
 
-          const live = term.list(exec.agent as Agent).length
+          const owner = requireAgent(exec.agent)
+          const term = requireTerminals(ctx, owner)
+          // 预算只计本插件创建且仍存活的会话：term.list(owner) 还包含其他工具
+          // （persistent-bash / tool-terminal）持有的 PTY，拿它当预算会误拒。
+          const listed = term.list(owner)
+          const listedIds = new Set(listed.map((entry) => String(entry.sessionId)))
+          for (const id of spawnedIds) {
+            if (!listedIds.has(id)) spawnedIds.delete(id)
+          }
+          const live = listed.filter(
+            (entry) => spawnedIds.has(String(entry.sessionId)) && entry.status.kind === 'running',
+          ).length
           if (!underSessionBudget(live, config.maxSessions)) {
             throw new Error(
               `interactive-shell: session budget exceeded (${live}/${config.maxSessions}) — kill a session first`,
@@ -552,19 +762,22 @@ export function apply(ctx: Context, config: Config): () => void {
           }
           const mode = resolveMode(a.mode, config.defaultMode)
           // P1: 不将单次 tool call 的 exec.signal 传递给长期运行的后台 PTY 进程
-          const result = await terminals.spawn(exec.agent as Agent, {
-            type: 'shell',
-            name: a.command,
-          })
+          // 不传 name：PTY 的 owner 内显示名必须唯一，重复命令会触发 DUPLICATE_NAME，
+          // 与本插件「同一命令并行跑多个会话」的用法冲突；命令文本由台账与事件承载。
+          const result = await term.spawn(owner, { type: config.backendType ?? 'shell' })
+          spawnedIds.add(String(result.sessionId))
           const state: SessionState = {
             sessionId: result.sessionId,
-            owner: exec.agent as Agent,
+            owner,
+            term,
             mode,
             command: a.command,
+            timeoutMs: a.timeoutMs ?? config.dispatchTimeoutMs,
             trigger: a.trigger,
             watch: a.watch,
             watcherDispose: undefined,
-            lastRead: 0,
+            seenTotal: 0,
+            seenLastLine: '',
             lastOutputAt: Date.now(),
             lastEventAt: undefined,
             eventsFired: 0,
@@ -572,6 +785,12 @@ export function apply(ctx: Context, config: Config): () => void {
             monitoring: mode === 'monitor',
             dispose: () => {},
           }
+          // Resynchronize the delta cursor on the spawn-time scrollback: this
+          // call already returns the motd, so only output produced after it
+          // counts as new.
+          const head = term.read(owner, result.sessionId, { offset: 0, count: 1 })
+          state.seenTotal = head.totalLines
+          state.seenLastLine = head.text
           if (a.watch !== undefined && a.watch !== '') {
             state.watcherDispose = attachFileWatch(state, a.watch)
           }
@@ -624,7 +843,10 @@ export function apply(ctx: Context, config: Config): () => void {
               `interactive-shell: session ${a.sessionId} is currently locked by user takeover (${lock.lockedBy ?? 'user'}) — wait for user to release control`,
             )
           }
-          const op = term.startSend(exec.agent as Agent, TerminalSessionId(a.sessionId), {
+          const owner = requireAgent(exec.agent)
+          const session = sessions.get(a.sessionId)
+          const term = session?.term ?? requireTerminals(ctx, owner)
+          const op = term.startSend(owner, TerminalSessionId(a.sessionId), {
             text: a.input,
             submit: a.submit ?? false,
             signal: exec.signal,
@@ -634,7 +856,10 @@ export function apply(ctx: Context, config: Config): () => void {
         }
         case 'status': {
           if (a.sessionId === undefined) throw new Error('interactive_shell status requires sessionId')
-          const snap = term.list(exec.agent as Agent).find((s) => s.sessionId === a.sessionId)
+          const owner = requireAgent(exec.agent)
+          const tracked = sessions.get(a.sessionId)
+          const term = tracked?.term ?? requireTerminals(ctx, owner)
+          const snap = term.list(owner).find((s) => s.sessionId === a.sessionId)
           if (snap === undefined) {
             const state = sessions.get(a.sessionId)
             if (state !== undefined) stopPolling(state)
@@ -643,7 +868,7 @@ export function apply(ctx: Context, config: Config): () => void {
             return { text: `session ${a.sessionId} not found`, exited: false }
           }
           const tail = truncateTail(
-            term.read(exec.agent as Agent, TerminalSessionId(a.sessionId)).text,
+            term.read(owner, TerminalSessionId(a.sessionId)).text,
             config.outputTailBytes,
           )
           const exited = snap.status.kind === 'exited'
@@ -658,15 +883,20 @@ export function apply(ctx: Context, config: Config): () => void {
         }
         case 'read': {
           if (a.sessionId === undefined) throw new Error('interactive_shell read requires sessionId')
-          const result = term.read(exec.agent as Agent, TerminalSessionId(a.sessionId))
+          const owner = requireAgent(exec.agent)
+          const term = sessions.get(a.sessionId)?.term ?? requireTerminals(ctx, owner)
+          const result = term.read(owner, TerminalSessionId(a.sessionId))
           return { sessionId: a.sessionId, text: sanitizeOutput(truncateTail(result.text, config.outputTailBytes)), exited: false }
         }
         case 'kill': {
           if (a.sessionId === undefined) throw new Error('interactive_shell kill requires sessionId')
-          await term.kill(exec.agent as Agent, TerminalSessionId(a.sessionId), 'interactive-shell kill')
+          const owner = requireAgent(exec.agent)
+          const term = sessions.get(a.sessionId)?.term ?? requireTerminals(ctx, owner)
+          await term.kill(owner, TerminalSessionId(a.sessionId), 'interactive-shell kill')
           const state = sessions.get(a.sessionId)
           if (state !== undefined) stopPolling(state)
           sessions.delete(a.sessionId)
+          spawnedIds.delete(a.sessionId)
           trace.record('session-killed', { sessionId: a.sessionId })
           streamHub.broadcast({
             type: 'term:event',
@@ -697,9 +927,11 @@ export function apply(ctx: Context, config: Config): () => void {
             state.watcherDispose?.()
             state.watcherDispose = attachFileWatch(state, a.watch)
           }
-          // Zero-wait instant check if trigger was updated
+          // Zero-wait instant check if trigger was updated: probe the current
+          // page (not the delta) so an already-printed line still fires, and
+          // resynchronize the delta cursor for subsequent wake-ups.
           if (state.trigger !== undefined) {
-            pollMonitor(state)
+            probeMonitor(state)
           }
           return {
             sessionId: a.sessionId,
@@ -719,7 +951,7 @@ export function apply(ctx: Context, config: Config): () => void {
         throw error
       }
     },
-  }
+  })
 
   ctx.effect(() => {
     const disposeTool = ctx.tools.register(tool)

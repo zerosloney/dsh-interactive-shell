@@ -9,9 +9,9 @@ import {
   truncateTail,
   underSessionBudget,
 } from '../lib/pure.js'
-import { TraceSink, DEFAULT_TRACE_PATH } from '../lib/trace.js'
+import { TraceSink, DEFAULT_TRACE_PATH, defaultTracePath } from '../lib/trace.js'
 import { mkdtempSync, readFileSync, rmSync } from 'node:fs'
-import { tmpdir } from 'node:os'
+import { homedir, tmpdir } from 'node:os'
 import { join } from 'node:path'
 
 test('underSessionBudget: allows below the cap, denies at/above it', () => {
@@ -127,4 +127,29 @@ test('TraceSink: creates with defaults and rotates file when exceeding maxBytes'
   } finally {
     rmSync(tempDir, { recursive: true, force: true })
   }
+})
+
+test('TraceSink: 默认台账路径落在 harness home（$DSH_HOME，未设置时 ~/.dsh）', () => {
+  assert.equal(
+    defaultTracePath({ DSH_HOME: join('C:', 'dsh-home') }),
+    join('C:', 'dsh-home', 'interactive-shell', 'traces.jsonl'),
+  )
+  assert.equal(
+    defaultTracePath({ DSH_HOME: '   ' }),
+    join(homedir(), '.dsh', 'interactive-shell', 'traces.jsonl'),
+  )
+  assert.equal(
+    defaultTracePath({}),
+    join(homedir(), '.dsh', 'interactive-shell', 'traces.jsonl'),
+  )
+  assert.equal(
+    DEFAULT_TRACE_PATH,
+    defaultTracePath(),
+    '导出的常量与当前环境一致',
+  )
+  assert.equal(
+    TraceSink.create(undefined).path,
+    defaultTracePath(),
+    '创建时按当前环境解析（可感知后续 DSH_HOME 变更）',
+  )
 })

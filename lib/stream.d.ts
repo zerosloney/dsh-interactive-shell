@@ -28,11 +28,11 @@ export interface TermOutputFrame {
     lineEnd: number;
     time: number;
 }
-/** Lifecycle event frame (dispatch completed, monitor trigger, kill). */
+/** Lifecycle event frame (dispatch completed, monitor trigger, kill, mirror throttle). */
 export interface TermEventFrame {
     type: 'term:event';
     sessionId: string;
-    event: 'session-started' | 'dispatch-completed' | 'monitor-triggered' | 'session-killed' | 'exited';
+    event: 'session-started' | 'dispatch-completed' | 'monitor-triggered' | 'session-killed' | 'exited' | 'output-throttled';
     payload: Record<string, unknown>;
     time: number;
 }

@@ -6,27 +6,55 @@ import { join } from 'node:path'
 import { Context } from '@deepseek-ai/cordis'
 import { apply } from '../lib/index.js'
 
-/** Minimal fake terminals seam. */
+/**
+ * Faithful terminals seam double: one shared scrollback buffer driven by
+ * `setOutput()` (which appends, like a live PTY) and a `read()` implementing
+ * the shipped `LocalPtySession.read()` contract — offset counted backwards
+ * from the newest line, `count`-bounded page, `totalLines`/`lineBegin`/`lineEnd`
+ * accounting. A fake that returned the whole buffer behind a forward cursor
+ * masked the delta defect this suite now pins.
+ */
 function fakeTerminals() {
   let seq = 0
   const sessions = new Map()
-  // 可控输出：read 返回当前缓冲；setOutput 用于回归测试驱动轮询路径。
-  let output = ''
-  let line = 0
+  const spawnRequests = []
+  let buffer = ''
   return {
+    /** Append raw PTY output; repeated calls accumulate like a running program. */
     setOutput(text) {
-      output = text
-      line += 1
+      buffer += text
+    },
+    /** Register a session owned by another tool (e.g. tool-bash-persistent). */
+    addForeignSession(id) {
+      sessions.set(id, { sessionId: id, status: { kind: 'running' }, type: 'shell' })
+    },
+    /** The request the most recent spawn() received. */
+    lastSpawnRequest() {
+      return spawnRequests[spawnRequests.length - 1]
     },
     list: () => [...sessions.values()],
-    spawn: async () => {
+    spawn: async (_agent, request) => {
+      spawnRequests.push(request)
       const sessionId = `t${++seq}`
       const snap = { sessionId, status: { kind: 'running' }, type: 'shell' }
       sessions.set(sessionId, snap)
       return { ...snap, motd: 'welcome' }
     },
     startSend: () => ({ done: Promise.resolve({ viewport: 'sent', waitReason: 'ready', sessionStatus: { kind: 'running' }, truncated: false }) }),
-    read: () => ({ text: output, totalLines: 1, lineBegin: 0, lineEnd: line, truncated: false }),
+    read: (_agent, _id, request = {}) => {
+      const offset = request.offset ?? 0
+      const count = request.count ?? 500
+      const lines = buffer.length === 0 ? [] : buffer.split('\n')
+      const totalLines = lines.length
+      if (offset >= totalLines) {
+        return { text: '', totalLines, lineBegin: offset, lineEnd: offset, truncated: false }
+      }
+      const end = totalLines - offset
+      const start = Math.max(0, end - count)
+      const text = lines.slice(start, end).join('\n')
+      const returnedLines = text.length === 0 ? 0 : text.split('\n').length
+      return { text, totalLines, lineBegin: offset, lineEnd: offset + returnedLines, truncated: false }
+    },
     signal: async () => ({ processGroupId: 1 }),
     kill: async () => true,
   }
@@ -63,11 +91,22 @@ test('apply registers the single interactive_shell tool', () => {
 test('spawn action starts a session and returns its id + motd', async () => {
   const { registered, stop } = makeCtx()
   const tool = registered[0]
-  const exec = { signal: new AbortController().signal, agent: undefined }
+  const exec = { signal: new AbortController().signal, agent: { id: 'agent-1' } }
   const result = await tool.execute({ action: 'spawn', command: 'vim config.yaml' }, exec)
   assert.match(result.sessionId, /^t\d+/)
   assert.equal(result.exited, false)
   assert.match(result.text, /welcome/)
+  stop()
+})
+
+test('spawn without a calling agent is refused with the owner-scoping reason', async () => {
+  const { registered, stop } = makeCtx()
+  const tool = registered[0]
+  const exec = { signal: new AbortController().signal, agent: undefined }
+  await assert.rejects(
+    () => tool.execute({ action: 'spawn', command: 'vim config.yaml' }, exec),
+    /requires a calling agent/,
+  )
   stop()
 })
 
@@ -79,11 +118,22 @@ test('send action requires sessionId and input', async () => {
   stop()
 })
 
-test('unknown action rejects with a clear error', async () => {
+test('未知 action 由参数 schema 拒绝（defineTool 在 execute 之前校验）', async () => {
   const { registered, stop } = makeCtx()
   const tool = registered[0]
-  const exec = { signal: new AbortController().signal, agent: undefined }
-  await assert.rejects(() => tool.execute({ action: 'explode' }, exec), /unknown action/)
+  const exec = { signal: new AbortController().signal, agent: { id: 'agent-1' } }
+  await assert.rejects(() => tool.execute({ action: 'explode' }, exec), /invalid arguments/)
+  stop()
+})
+
+test('非法 mode 由参数 schema 拒绝（枚举校验）', async () => {
+  const { registered, stop } = makeCtx()
+  const tool = registered[0]
+  const exec = { signal: new AbortController().signal, agent: { id: 'agent-1' } }
+  await assert.rejects(
+    () => tool.execute({ action: 'spawn', command: 'vim a.txt', mode: 'turbo' }, exec),
+    /invalid arguments/,
+  )
   stop()
 })
 
@@ -137,18 +187,20 @@ test('dispatch 静默窗：持续输出不完成，静默后完成（P0: 原实�
   const events = []
   ctx.on('interactive-shell/dispatch-completed', (payload) => events.push(payload))
 
-  terminals.setOutput('tick output\n')
-  await tool.execute({ action: 'spawn', command: 'npm run dev', mode: 'dispatch' }, exec)
+  const spawned = await tool.execute({ action: 'spawn', command: 'npm run dev', mode: 'dispatch' }, exec)
+  assert.ok(spawned.sessionId)
 
-  // 持续有输出 → lastOutputAt 不断刷新 → 不应提前完成。
-  await sleep(1100)
+  // 持续产生真实增量输出 → 每个 tick 都刷新 lastOutputAt → 不应提前完成。
+  for (let i = 0; i < 6; i += 1) {
+    terminals.setOutput(`tick ${i}\n`)
+    await sleep(100)
+  }
   assert.equal(events.length, 0, '持续输出时 dispatch 不应完成')
 
   // 静默 → 超过 quietMs 后应完成一次并清理。
-  terminals.setOutput('')
   await sleep(1100)
   assert.ok(events.length >= 1, '静默窗后应触发 dispatch-completed')
-  assert.equal(events[0].tail, '')
+  assert.equal(typeof events[0].tail, 'string')
   stop()
 })
 
@@ -180,16 +232,16 @@ test('kill 已存在会话返回终止并写入台账（可追踪审计）', asy
   stop()
 })
 
-test('unknown action 的错误写入 trace 台账（异常路径可追溯）', async () => {
+test('动作期校验失败写入 trace 台账（异常路径可追溯）', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'sh-trace-'))
   const tracePath = join(dir, 'traces.jsonl')
   const { registered, stop } = makeCtx({ tracePath })
   const tool = registered[0]
   const exec = { signal: new AbortController().signal, agent: { id: 'agent-1' } }
-  await assert.rejects(() => tool.execute({ action: 'explode' }, exec), /unknown action/)
+  await assert.rejects(() => tool.execute({ action: 'read' }, exec), /read requires sessionId/)
   const trace = readFileSync(tracePath, 'utf8').trim().split('\n').map((l) => JSON.parse(l))
   assert.equal(trace[0].event, 'error')
-  assert.match(trace[0].detail.message, /unknown action/)
+  assert.match(trace[0].detail.message, /read requires sessionId/)
   stop()
 })
 
@@ -214,8 +266,9 @@ test('P0: dispatch 完成时通过 agent.followup 唤醒 Agent', async () => {
   assert.ok(wokeMessages.length >= 1, `Agent 应收到 followup 唤醒消息，实际收到 ${wokeMessages.length}`)
   const msg = wokeMessages[0]
   assert.equal(msg.role, 'user')
-  assert.equal(msg.source.kind, 'plugin')
-  assert.equal(msg.source.plugin, 'interactive-shell')
+  // dsh 0.1.7 退役了通配的 `plugin` 源类型；本插件声明自己的 kind。
+  assert.equal(msg.source.kind, 'interactive-shell')
+  assert.equal(msg.source.form, 'notice')
   assert.match(msg.content[0].text, /completed/)
   stop()
 })
@@ -446,6 +499,90 @@ test('M4 Phase 3: 交还控制权 (handback / releaseLock) 自动唤醒 Agent �
   assert.match(wokeMessages[0].source.summary, /User released control of shell session/)
   assert.match(wokeMessages[0].content[0].text, /已杀死占用 99% CPU 的死循环进程 PID 4321/)
 
+  stop()
+})
+
+// ---------- 工具契约 / 缝隙用法回归（dsh 0.1.7） ----------
+
+test('spawn 使用配置的 backendType，且不占用 PTY 显示名（避免 DUPLICATE_NAME）', async () => {
+  const { registered, stop, terminals } = makeCtx({ backendType: 'custom-pty' })
+  const tool = registered[0]
+  const exec = { signal: new AbortController().signal, agent: { id: 'agent-1' } }
+
+  const first = await tool.execute({ action: 'spawn', command: 'npm test' }, exec)
+  assert.equal(terminals.lastSpawnRequest().type, 'custom-pty')
+  assert.equal(terminals.lastSpawnRequest().name, undefined, 'PTY 显示名留给宿主，同命令并行不应冲突')
+  const second = await tool.execute({ action: 'spawn', command: 'npm test' }, exec)
+  assert.notEqual(first.sessionId, second.sessionId)
+  stop()
+})
+
+test('会话预算只统计本插件的存活会话（不受其他工具持有的 PTY 影响）', async () => {
+  const { registered, stop, terminals } = makeCtx({ maxSessions: 1 })
+  const tool = registered[0]
+  const exec = { signal: new AbortController().signal, agent: { id: 'agent-1' } }
+
+  terminals.addForeignSession('other-tool-pty')
+  const first = await tool.execute({ action: 'spawn', command: 'vim a.txt' }, exec)
+  assert.ok(first.sessionId)
+  await assert.rejects(
+    () => tool.execute({ action: 'spawn', command: 'vim b.txt' }, exec),
+    /budget exceeded/,
+  )
+
+  // 释放自己的会话后可再开一个；别人持有的 PTY 始终不占预算。
+  await tool.execute({ action: 'kill', sessionId: first.sessionId }, exec)
+  const second = await tool.execute({ action: 'spawn', command: 'vim c.txt' }, exec)
+  assert.ok(second.sessionId)
+  stop()
+})
+
+test('dispatch 的 per-call timeoutMs 生效（不依赖静默窗）', async () => {
+  const { ctx, registered, stop } = makeCtx({ dispatchQuietMs: 600000, dispatchTimeoutMs: 600000 })
+  const tool = registered[0]
+  const events = []
+  ctx.on('interactive-shell/dispatch-completed', (payload) => events.push(payload))
+  const exec = { signal: new AbortController().signal, agent: { id: 'agent-1' } }
+
+  await tool.execute(
+    { action: 'spawn', command: 'sleep 60', mode: 'dispatch', timeoutMs: 1000 },
+    exec,
+  )
+  await sleep(1500)
+  assert.equal(events.length, 1, `到达 deadline 应完成一次，实际 ${events.length}`)
+  stop()
+})
+
+test('timeoutMs 越界时报出可操作错误', async () => {
+  const { registered, stop } = makeCtx()
+  const tool = registered[0]
+  const exec = { signal: new AbortController().signal, agent: { id: 'agent-1' } }
+  await assert.rejects(
+    () => tool.execute({ action: 'spawn', command: 'npm test', mode: 'dispatch', timeoutMs: 10 }, exec),
+    /timeoutMs must be between/,
+  )
+  stop()
+})
+
+test('流式镜像受 maxOutputBytesPerSec 限流（熔断器已接入广播路径）', async () => {
+  const { ctx, registered, stop, terminals } = makeCtx({ maxOutputBytesPerSec: 1024 })
+  const tool = registered[0]
+  const frames = []
+  ctx.on('interactive-shell/stream-frame', (frame) => frames.push(frame))
+  const exec = { signal: new AbortController().signal, agent: { id: 'agent-1' } }
+
+  await tool.execute({
+    action: 'spawn',
+    command: 'tail -f huge.log',
+    mode: 'monitor',
+    trigger: 'NEVER_MATCHES',
+  }, exec)
+  terminals.setOutput(`${'x'.repeat(4096)}\n`)
+  await sleep(400)
+
+  const throttled = frames.filter((frame) => frame.type === 'term:event' && frame.event === 'output-throttled')
+  assert.equal(throttled.length, 1, '应广播一次限流事件')
+  assert.equal(frames.filter((frame) => frame.type === 'term:output').length, 0, '超限窗口内不再广播输出帧')
   stop()
 })
 

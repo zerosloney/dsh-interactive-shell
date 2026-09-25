@@ -1,8 +1,16 @@
 # dsh-interactive-shell bundle patch: inserts the interactive-shell bridge
 # into any profile that lists this package in `dsh.profile.bundles`.
-# Rides the host's ctx.terminals seam — the base bundle's terminal-bash row
-# provides the PTY backend (readiness detection, sandbox composition, bounded
-# scrollback). This patch inserts only the bridge and ships no backend itself.
+#
+# The bridge itself ships no PTY backend. Since dsh 0.1.7 the PTY family is
+# mounted by an AGENT PRESET (`@deepseek-ai/dsh-terminal` +
+# `@deepseek-ai/dsh-terminal-bash`, e.g. the shipped `minimal` preset's
+# persistent-shell group) inside an `isolate` realm, so a row inserted here —
+# the host plane — cannot inject `terminals`. The plugin therefore resolves
+# the registry per calling agent (`ctx.agentPresets.serviceFor(agent,
+# 'terminals')`, falling back to `ctx.get('terminals')` when this row is
+# mounted beside the provider) and fails loudly with install guidance when
+# the agent's preset mounts none. Add this bundle to a profile whose preset
+# mounts the PTY family, or place the row inside that same realm.
 - insert:
     - id: interactive-shell
       name: 'dsh-interactive-shell'
@@ -10,17 +18,25 @@
         # Default mode for a spawned session when the tool call omits one.
         # monitor = event-driven wake-up, zero polling between triggers.
         defaultMode: monitor
-        # Upper bound on concurrently live sessions per agent.
+        # Upper bound on concurrently live sessions this bridge owns per agent
+        # (sessions held by other tools do not consume it).
         maxSessions: 4
+        # Registered PTY backend type for new sessions (terminal-bash backendType).
+        backendType: shell
         # Bytes of output tail returned to the model per event/wake-up.
         outputTailBytes: 4096
         # Dispatch mode: window of output silence that completes a run.
         dispatchQuietMs: 5000
-        # Dispatch mode: absolute deadline before forced completion.
+        # Dispatch mode: default absolute deadline before forced completion
+        # (a spawn call may override it per run with its own timeoutMs).
         dispatchTimeoutMs: 600000
         # Monitor mode: minimum spacing between two trigger wake-ups.
         monitorCooldownMs: 2000
         # Monitor mode: per-monitor event budget before auto-detach.
         monitorMaxEvents: 100
-        # JSONL 事件台账路径；留空 = ~/.dsh-interactive-shell/traces.jsonl（超限轮转 .1）
+        # Bytes/second mirrored to stream clients before frames are throttled
+        # (an `output-throttled` event marks the transition; `read` resyncs).
+        maxOutputBytesPerSec: 524288
+        # JSONL 事件台账路径；留空 = $DSH_HOME（未设置为 ~/.dsh）下的
+        # interactive-shell/traces.jsonl（超限轮转 .1）
         tracePath: ''

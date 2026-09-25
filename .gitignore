@@ -1,3 +1,5 @@
 node_modules/
 .cbx/
+# Local release artifacts produced by `npm pack` (scripts/release.mjs).
+docs/packages/*.tgz
 

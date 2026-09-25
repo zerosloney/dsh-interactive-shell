@@ -2,7 +2,7 @@
 
 让 Agent 亲手驱动真实交互式 CLI（vim / psql / ssh / `npm run dev` / `docker logs -f`），用户在 Web 端实时观看输出并可随时按键接管。移植自 [pi-interactive-shell](https://github.com/nicobailon/pi-interactive-shell)，深度融合 DeepSeek Harness 的 `ctx.terminals` PTY 缝隙与 Cordis 服务总线。
 
-**状态：生产就绪（M1 ~ M8 全量落地与加固，单元/集成/E2E 86/86 测试全绿，行覆盖率 96.05%）。**
+**状态：已对齐 dsh 0.1.7-rc.2（101/101 测试全绿，行覆盖率 96.57%）。最低宿主版本 dsh ≥ 0.1.7-rc.2。**
 
 ---
 
@@ -45,6 +45,47 @@ graph TD
   StreamHub -->|agent.followup / notice| Agent
   StreamHub -->|Stream Frames| Recorder[SessionRecorder / Asciinema Export]
 ```
+
+---
+
+## 与 dsh 0.1.7 的集成前提（必读）
+
+dsh **0.1.7-rc.2** 起，PTY 家族（`@deepseek-ai/dsh-terminal` +
+`@deepseek-ai/dsh-terminal-bash`）改由 **agent preset** 挂载在 `isolate`
+隔离域内；`dsh-base` / `dsh-web-app` 不再提供 host 级 `ctx.terminals`，
+且默认的 `standard` preset 本身**不含** PTY。因此：
+
+- 本插件按调用方 agent 逐次解析注册表：
+  `ctx.agentPresets.serviceFor(agent, 'terminals')`，若本行与 PTY provider
+  同域（把桥接行放进同一 isolate realm）则回退 `ctx.get('terminals')`；
+- **所选 preset 必须挂载 PTY 家族**，例如 dsh 自带的 `minimal` preset
+  （其 `persistent-shell` 组同时挂 `pty` + `terminal-bash` + persistent 工具）；
+- 该 agent 的 preset 没有 PTY 时，`interactive_shell` 调用会抛出带安装
+  指引的错误（**不再静默不注册**），组合里完全没有 PTY 缝隙时启动即告警；
+- 会话的输出增量按 `totalLines` 差分交付（`read()` 的 `offset` 是回退偏移，
+  不是前进游标），`attach-monitor` 的零等待探针读当前页后重同步游标。
+
+---
+
+## 配置项
+
+全部配置项与 `cordis.patch.yml` 中的行一一对应（schema 里都有同值默认值）：
+
+| 配置 | 默认 | 作用 |
+|---|---|---|
+| `defaultMode` | `monitor` | `spawn` 未指定 `mode` 时的默认驱动模式 |
+| `maxSessions` | `4` | 本插件**自己**持有的存活会话上限（其他工具的 PTY 不计入） |
+| `backendType` | `shell` | 新会话使用的 PTY 后端类型（对应 `terminal-bash.backendType`） |
+| `outputTailBytes` | `4096` | 每次事件/唤醒交给模型的尾部字节预算 |
+| `dispatchQuietMs` | `5000` | dispatch 模式：输出静默多久判定为完成 |
+| `dispatchTimeoutMs` | `600000` | dispatch 模式：默认绝对 deadline（`spawn` 可用 `timeoutMs` 覆盖） |
+| `monitorCooldownMs` | `2000` | monitor 模式：两次触发唤醒的最小间隔 |
+| `monitorMaxEvents` | `100` | monitor 模式：单个 monitor 的事件预算，用尽后自动脱离 |
+| `maxOutputBytesPerSec` | `524288` | 镜像到 Web 端的输出速率上限，超限广播 `output-throttled` |
+| `tracePath` | `''` | JSONL 台账路径；空 = `$DSH_HOME`（未设置为 `~/.dsh`）下的 `interactive-shell/traces.jsonl` |
+| `securityPolicy` | `balanced` | 自研命令策略级别（`permissive` / `balanced` / `strict`） |
+| `blockedCommands` / `allowedCommandsOnly` | `[]` | 显式的命令黑名单 / 白名单前缀 |
+| `redactSensitiveData` | `true` | 对模型可见输出与台账做凭据脱敏 |
 
 ---
 
@@ -122,6 +163,6 @@ node examples/demo-recorder.mjs
 
 ## 质量与验收指标
 
-- **自动化测试**：86/86 项测试全部通过（包含单元测试、时序回归测试、P0~P3 全里程碑特性验证、M4 E2E 完整生命周期场景、Web Component 深度单测、自适应极速探针、提示词按键序列生成器及 WsClientTransport / LocalStreamTransport 深度测试）。
-- **代码覆盖率**：全工程综合行覆盖率 **96.05%**，函数覆盖率 **93.96%**，所有 11 个核心模块 91%+。
-- **代码规范**：`tsc --strict` 与 `oxlint` 0 警告、0 错误。
+- **自动化测试**：101/101 项测试全部通过（包含单元测试、时序回归测试、P0~P3 全里程碑特性验证、M4 E2E 完整生命周期场景、Web Component 深度单测、自适应极速探针、提示词按键序列生成器、WsClientTransport / LocalStreamTransport 深度测试，以及 dsh 0.1.7 对齐的 **`test/p0-regression.test.mjs`**（seam 按 agent 解析、增量不重不漏、同行原地改写、scrollback 裁剪重对齐、消息源 kind）与**工具契约回归**（schema 校验、backendType、预算归属、per-call `timeoutMs`、镜像限流））。
+- **代码覆盖率**：全工程综合行覆盖率 **96.57%**，分支 **86.18%**，函数 **94.74%**（v8，`node --experimental-test-coverage`，对 dsh 0.1.7-rc.2 依赖复测；0.3.4 基线为 96.05% / 85.60% / 93.96%）。
+- **代码规范**：`tsc --strict` 与 `oxlint` 0 警告、0 错误；依赖对 **dsh 0.1.7-rc.2** 的真实发布包完成 typecheck。

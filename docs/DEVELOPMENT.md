@@ -71,6 +71,5 @@ npm run release:dry-run      # 预览：门禁 + 打包清单，不改动任何�
 
 ## 已知约束
 
-- 本插件不包含 PTY/调试器等外部后端，依赖 harness 基础 bundle 提供的
-  seam（terminals / subprocess / llm / sessions）；
+- 本插件不包含 PTY/调试器等外部后端，依赖宿主提供的 seam（terminals / subprocess / llm / sessions）。**dsh 0.1.7-rc.2 起 PTY 家族由 agent preset 挂载在 `isolate` 隔离域内**（默认 `standard` preset 不含 PTY），插件按调用方 agent 解析注册表；所选 preset 必须挂载 `@deepseek-ai/dsh-terminal` + `@deepseek-ai/dsh-terminal-bash`（如自带的 `minimal` preset），否则 `interactive_shell` 调用会抛出安装指引；
 - 台账遵循最小收集原则：只记事件名与结构化摘要，不记录输出内容。

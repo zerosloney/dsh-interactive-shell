@@ -6,7 +6,67 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+
+- **P0：PTY 缝隙改为按 agent 解析（dsh 0.1.7 兼容）**。0.1.7 起
+  `@deepseek-ai/dsh-terminal` + `terminal-bash` 由 agent preset 挂载在
+  `isolate` 隔离域内，host 平面的 `ctx.get('terminals')` 恒为 `undefined`，
+  原实现因此**静默不注册工具**。新增 `src/seam.ts`：按
+  `ctx.agentPresets.serviceFor(agent, 'terminals')` → `ctx.get('terminals')`
+  的顺序逐调用解析；每个会话绑定 spawn 时解析到的实例；两者皆无时工具调用
+  抛出可操作的安装指引（`PTY_UNAVAILABLE_MESSAGE`），并在组合缺失 PTY 时
+  启动告警。工具始终注册（可用性只能在调用点判定）。
+- **P0：输出增量游标修正**。`ctx.terminals.read()` 的 `offset` 是「距最新行
+  的回退偏移」，原实现把 `lineEnd` 当前进游标复用，导致 monitor 触发与
+  dispatch 静默窗读到的是**陈旧/重复的旧输出**（实测：新增 `error:` 行永不
+  命中）。改为基于 `totalLines` 的差分交付，覆盖三类情形：新增整行、
+  同行原地改写（进度条/spinner）、有界 scrollback 裁剪后的重新对齐；
+  `attach-monitor` 保留零等待**快照**探针以维持「挂载即检」语义，随后
+  重同步游标。触发匹配改用未截断的原始增量（截断只作用于模型可见尾部）。
+- **P0：唤醒消息源类型**。dsh 0.1.7 退役了通配的 `source.kind: 'plugin'`
+  （session format v4 显式拒绝该值），改用本插件自己的
+  `declare module '@deepseek-ai/dsh-llm'` 声明 `'interactive-shell'` kind，
+  并按 harness 约定用 `boundContextSummary` 将 notice summary 截断到 120 字符。
+- **测试假体对齐真实契约**：`apply/e2e` 的 terminals 双端改为「可追加的
+  scrollback + 最新相对偏移分页」的忠实实现（原先整缓冲 + 前进游标恰好
+  掩盖了上述游标缺陷）；新增 `test/p0-regression.test.mjs`（7 例）覆盖
+  seam 解析、增量不重不漏、行内改写、scrollback 裁剪与消息源类型。
+- **P1：工具注册改为 `defineTool`**：模型参数按 schema 校验（`action`/`mode`
+  枚举、`timeoutMs` 整数、输出必含 `text`），每个参数补齐模型可见的
+  `description`；未知 action / 非法 mode 现在由 schema 直接拒绝
+  （`invalid arguments`），不再落到执行期。
+- **P1：spawn 不再占用 PTY 显示名**：PTY 的 owner 内名字必须唯一，把整条命令
+  当 `name` 会让「同命令并行跑多个会话」触发 `DUPLICATE_NAME`；改为不传
+  `name`，命令文本仍由台账与 `interactive-shell/session-started` 事件承载。
+- **P1：PTY 后端类型可配**：新增 `Config.backendType`（默认 `shell`，对应
+  `terminal-bash.backendType`），不再硬编码。
+- **P1：会话预算只计本插件的存活会话**：此前用 `term.list(agent)` 统计，会把
+  其他工具（`tool-bash-persistent` / `tool-terminal`）持有的 PTY 也算进
+  `maxSessions` 而误拒；现按本插件登记的 session id 且状态为 running 计数，
+  并在 kill / 会话消失时回收。
+- **P1：`timeoutMs` 真正生效**：工具参数里的 dispatch 绝对 deadline 已接线
+  （`SessionState.timeoutMs`，越界报出可操作错误），此前该参数是死字段。
+- **P2：台账默认路径迁入 harness home**：`tracePath` 留空时写
+  `$DSH_HOME`（未设置则 `~/.dsh`）下的 `interactive-shell/traces.jsonl`，
+  而不再是散落在 OS home 的 `~/.dsh-interactive-shell/`（`@deepseek-ai/dsh-util-home-paths`
+  未发布到 npm，故在插件内按同等优先级解析 `$DSH_HOME`）。
+- **P2：`StreamCircuitBreaker` 接入广播路径**：新增
+  `Config.maxOutputBytesPerSec`（默认 512 KB/s）。超限窗口内不再向
+  `StreamHub` 广播 `term:output` 帧，仅在首次触发时广播
+  `term:event` 的 `output-throttled`（并落台账），Web 端可用 `read` 重取；
+  模型侧的 `read`/`status` 不受该限流影响。
+
 ### Changed
+
+- **最低 dsh 版本提升到 `0.1.7-rc.2`**：全部 `@deepseek-ai/*` peer/dev
+  依赖从 `^0.1.1-rc.2` 改为 `^0.1.7-rc.2`（semver 预发布规则下
+  `^0.1.1-rc.2` 本就**不匹配** 0.1.7-rc.2，正是类型漂移未被发现的原因），
+  并新增 `@deepseek-ai/dsh-agent-preset-registry` peer（仅类型依赖，
+  用于 `Context.agentPresets` 增强）。
+- **无调用 agent 时响亮失败**：`spawn` 等动作不再以 `exec.agent as Agent`
+  强转，而是由 `requireAgent` 抛出明确的 owner 作用域错误。
+- **发布卫生**：补齐 MIT `LICENSE` 并纳入发布包；`docs/packages/*.tgz` 改为
+  本地发布产物（`.gitignore`），不再随仓库入库。
 
 - **发布流程改为本机执行，保留 GitHub CI**：保留 `.github/workflows/ci.yml`
   （lint + 单测 + 覆盖率门禁仍由 GitHub Actions 执行），删除发布流水线

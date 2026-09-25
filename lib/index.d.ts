@@ -1,5 +1,6 @@
 import type { Context } from '@deepseek-ai/cordis';
 import z from '@deepseek-ai/schemastery';
+import type { ContextFormed } from '@deepseek-ai/dsh-llm';
 import type { ShellMode } from './pure.js';
 import { StreamHub } from './stream.js';
 import type { TermFrame } from './stream.js';
@@ -30,8 +31,16 @@ export interface Config {
     dispatchTimeoutMs: number;
     monitorCooldownMs: number;
     monitorMaxEvents: number;
-    /** JSONL 事件台账路径；空 = ~/.dsh-interactive-shell/traces.jsonl。 */
+    /** JSONL 事件台账路径；空 = `$DSH_HOME`/`~/.dsh` 下的 interactive-shell/traces.jsonl。 */
     tracePath: string;
+    /**
+     * Registered PTY backend type for new sessions (`terminal-bash.backendType`,
+     * default `shell`). Omitted rows fall back in code because a directly
+     * applied config carries no schema defaults.
+     */
+    backendType?: string;
+    /** Output bytes/second mirrored to stream clients before frames are throttled (default 512 KB/s). */
+    maxOutputBytesPerSec?: number;
     /** Global security policy level ('permissive' | 'balanced' | 'strict'). */
     securityPolicy?: SecurityPolicyLevel;
     /** List of command prefixes or regexes to block. */
@@ -73,6 +82,19 @@ declare module '@deepseek-ai/cordis' {
             state: 'agent_driving' | 'user_takeover';
             lockedBy?: string;
         }): void;
+    }
+}
+declare module '@deepseek-ai/dsh-llm' {
+    interface MessageSourceMap {
+        /**
+         * Wake-up notices this bridge injects into its owning agent's conversation.
+         *
+         * dsh 0.1.7 retired the catch-all `plugin` kind (session format v4 refuses
+         * it outright), so every producer declares its own kind here.
+         */
+        'interactive-shell': {
+            kind: 'interactive-shell';
+        } & ContextFormed;
     }
 }
 /**
