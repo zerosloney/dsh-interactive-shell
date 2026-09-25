@@ -1,19 +1,25 @@
 #!/usr/bin/env node
 /**
- * 本机一键发布脚本 —— 替代已删除的 GitHub Actions（ci.yml / publish.yml）。
+ * 本机一键发布脚本：门禁 + 版本递增 + 打包 + 提交/注解 tag/推送。
+ *
+ * npm publish 与 GitHub Release 由 GitHub Actions 执行
+ * （.github/workflows/publish.yml，`v*` tag 推送触发），所以推送 tag 后本脚本
+ * 不再重复发包；要纯本机发布请用 --publish-locally（并配合 --skip-git，
+ * 避免与 CI 抢同一版本）。
  *
  * 用法（在仓库根目录执行）：
- *   node scripts/release.mjs                 # 默认 patch 递增（0.3.4 -> 0.3.5）并完整发布
- *   node scripts/release.mjs minor           # minor 递增（0.3.4 -> 0.4.0）
- *   node scripts/release.mjs major           # major 递增（0.3.4 -> 1.0.0）
+ *   node scripts/release.mjs                 # 默认 patch 递增（0.3.5 -> 0.3.6）并完整发布
+ *   node scripts/release.mjs minor           # minor 递增（0.3.5 -> 0.4.0）
+ *   node scripts/release.mjs major           # major 递增（0.3.5 -> 1.0.0）
  *   node scripts/release.mjs 0.4.0           # 直接指定目标版本
  *   npm run release -- minor                 # 同上，通过 npm script 调用
  *
  * 开关：
- *   --dry-run      只做门禁（lint + 单测 + 覆盖率）与 npm pack 清单预览，不修改任何文件
- *   --skip-publish 完成 打包 + git 提交/tag/推送，跳过 npm publish
- *   --skip-git     跳过 git 提交/tag/推送（版本号与 tag 自行处理），仅执行门禁、打包与发布
- *   --gh-release   发布成功后额外调用 gh CLI 创建 GitHub Release（需安装并登录 GitHub CLI）
+ *   --dry-run           只做门禁（lint + 单测 + 覆盖率）与 npm pack 清单预览，不修改任何文件
+ *   --publish-locally   本机执行 npm publish（默认交给 CI；建议同时 --skip-git）
+ *   --skip-publish      历史开关，保留兼容：行为与默认一致（由 CI 发布）
+ *   --skip-git          跳过 git 提交/tag/推送（版本号与 tag 自行处理）
+ *   --gh-release        本机创建 GitHub Release（tag 已推送时由 CI 负责，会自动跳过）
  */
 import { execSync } from 'node:child_process'
 import { readFileSync } from 'node:fs'
@@ -30,9 +36,12 @@ const flags = new Set(args.filter((a) => a.startsWith('--')))
 const positional = args.filter((a) => !a.startsWith('--'))
 const bump = positional[0] ?? 'patch'
 const dryRun = flags.has('--dry-run')
+const publishLocally = flags.has('--publish-locally')
 const skipPublish = flags.has('--skip-publish')
 const skipGit = flags.has('--skip-git')
-let ghRelease = flags.has('--gh-release')
+const ghRelease = flags.has('--gh-release')
+/** tag 推送后由 GitHub Actions 负责 npm publish 与 GitHub Release。 */
+const ciPublishes = !skipGit
 
 if (!VALID_BUMPS.includes(bump) && !SEMVER.test(bump)) {
   console.error(`[release] 无效版本参数: ${bump}（应为 patch | minor | major | x.y.z）`)
@@ -40,6 +49,15 @@ if (!VALID_BUMPS.includes(bump) && !SEMVER.test(bump)) {
 }
 if (dryRun && (skipPublish || skipGit)) {
   console.warn('[release] 提示：--dry-run 与 --skip-* 同时使用，按预览模式执行（不修改任何文件）。')
+}
+if (skipPublish) {
+  console.log('[release] 提示：--skip-publish 已是默认行为（发布由 GitHub Actions 承担）。')
+}
+if (publishLocally && ciPublishes) {
+  console.warn(
+    '[release] 警告：--publish-locally 与 tag 推送同时使用会与 CI 争抢同一版本，' +
+    '建议配合 --skip-git 或直接依赖 CI 发布。',
+  )
 }
 
 /** 计算目标版本（不写盘，dry-run 与门禁阶段共用） */
@@ -77,8 +95,9 @@ if (dryRun) {
   console.log(`  1. npm version ${bump} --no-git-tag-version（${PKG.version} -> ${newVer}）`)
   console.log(`  2. npm pack --pack-destination docs/packages -> ${tarball}`)
   if (!skipGit) console.log(`  3. git commit + 注解 tag v${newVer} + push origin HEAD / v${newVer}`)
-  if (!skipPublish) console.log('  4. npm publish --access public')
-  if (ghRelease) console.log(`  5. gh release create v${newVer} --generate-notes`)
+  if (publishLocally) console.log('  4. npm publish --access public（本机发布）')
+  if (!skipGit) console.log('  4. GitHub Actions：npm publish + GitHub Release（v* tag 推送触发）')
+  if (ghRelease && skipGit) console.log(`  5. gh release create v${newVer} --generate-notes`)
   process.exit(0)
 }
 
@@ -112,29 +131,39 @@ if (!skipGit) {
 }
 
 // ---------- 7. npm 发布 ----------
-if (skipPublish) {
-  console.log(`\n[release] 已跳过 npm publish（--skip-publish）。`)
-  console.log(`  手动发布：npm publish --access public`)
-} else {
+if (publishLocally) {
   run('npm publish --access public')
+} else {
+  console.log('\n[release] 已跳过本机 npm publish：tag 推送后由 GitHub Actions 发布（.github/workflows/publish.yml）。')
+  console.log('  本机手动发布：npm publish --access public')
+  console.log('  脚本内本机发布：node scripts/release.mjs <version> --publish-locally --skip-git')
 }
 
 // ---------- 8. 可选：GitHub Release ----------
 if (ghRelease) {
-  let hasGh = true
-  try {
-    execSync('gh --version', { cwd: ROOT, stdio: 'ignore' })
-  } catch {
-    hasGh = false
-  }
-  if (hasGh) {
-    run(`gh release create v${newVer} ${tarball} --generate-notes --title "${PKG.name} v${newVer}"`)
+  if (ciPublishes) {
+    console.log('\n[release] GitHub Release 由 GitHub Actions 创建（tag 已推送），跳过 gh release create。')
   } else {
-    console.warn('[release] 未检测到 gh CLI，跳过 GitHub Release。')
+    let hasGh = true
+    try {
+      execSync('gh --version', { cwd: ROOT, stdio: 'ignore' })
+    } catch {
+      hasGh = false
+    }
+    if (hasGh) {
+      run(`gh release create v${newVer} ${tarball} --generate-notes --title "${PKG.name} v${newVer}"`)
+    } else {
+      console.warn('[release] 未检测到 gh CLI，跳过 GitHub Release。')
+    }
   }
 } else {
-  console.log(`\n[release] 如需 GitHub Release，可手动执行：`)
+  console.log('\n[release] 如需本机创建 GitHub Release（tag 未推送时），可执行：')
   console.log(`  gh release create v${newVer} ${tarball} --generate-notes`)
 }
 
-console.log(`\n[release] ✅ ${PKG.name} v${newVer} 发布完成。`)
+const outcome = publishLocally
+  ? '发布完成'
+  : ciPublishes
+    ? '提交与 tag 推送完成；npm publish 与 GitHub Release 由 CI 执行'
+    : '版本递增与打包完成（未推送 tag）'
+console.log(`\n[release] ✅ ${PKG.name} v${newVer} ${outcome}。`)

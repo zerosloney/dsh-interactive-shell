@@ -30,21 +30,27 @@ node --experimental-test-coverage --test "test/*.test.mjs"
 - `src/trace.ts` —— JSONL 事件台账（best-effort，永不抛错）；
 - `cordis.patch.yml` —— bundle 插入清单（配置项与 `Config` schema 一一对应）。
 
-## 发布流程（本机发布）
+## 发布流程（推送 tag → GitHub Actions 发布）
 
-GitHub Actions：CI（`ci.yml`）保留，lint + 单测 + 覆盖率门禁仍在 GitHub 上
-执行；发布流水线（`publish.yml`）已删除，`npm publish` 全程在本机完成，无需
-仓库配置 `NPM_TOKEN` secret。发布源已固定为官方 registry：
-`package.json` 的 `publishConfig.registry` 指向 `https://registry.npmjs.org/`
-（`npm install` 仍走本机 `.npmrc` 的 npmmirror 镜像）。本机认证二选一：
-- 设置环境变量 `NPM_TOKEN`（`.npmrc` 已配置 `//registry.npmjs.org/:_authToken=${NPM_TOKEN}`）；
-- 或执行 `npm login --registry https://registry.npmjs.org/`。
+两条 GitHub Actions 流水线：
 
-然后运行：
+| 流水线 | 触发 | 作用 |
+| --- | --- | --- |
+| `.github/workflows/ci.yml` | push / PR 到 `master`、`main` | `npm ci` → `oxlint` → `npm test` → 覆盖率 |
+| `.github/workflows/publish.yml` | 推送 `v*` tag（也可手动 `workflow_dispatch`） | `npm ci` → lint + 单测 + 覆盖率门禁 → `npm pack` → **npm publish** → **GitHub Release**（附 tarball） |
+
+仓库需配置一个 secret：**`NPM_TOKEN`**（发布凭证，写入官方 registry）。发布源
+固定为官方 registry（`package.json` 的 `publishConfig.registry` →
+`https://registry.npmjs.org/`），`npm install` 仍可走本机 `.npmrc` 的镜像。
+`publish.yml` 发布前先 `npm view <pkg>@<version>` 判重，版本已存在则跳过（幂等），
+并用 `concurrency` 阻止同一 tag 并发发两次。
+
+本机脚本 `scripts/release.mjs` 只负责**门禁 + 版本递增 + 打包 + 提交/tag/推送**；
+tag 一推送，npm 发布与 GitHub Release 交由 CI 完成（避免本机与 CI 抢同一版本）：
 
 ```bash
-npm run release              # 默认 patch 递增（0.3.4 → 0.3.5）并完整发布
-npm run release -- minor     # minor 递增（0.3.4 → 0.4.0）
+npm run release              # 默认 patch 递增（0.3.5 → 0.3.6）并推送 tag
+npm run release -- minor     # minor 递增（0.3.5 → 0.4.0）
 node scripts/release.mjs 0.4.0   # 直接指定目标版本
 npm run release:dry-run      # 预览：门禁 + 打包清单，不改动任何文件
 ```
@@ -52,22 +58,24 @@ npm run release:dry-run      # 预览：门禁 + 打包清单，不改动任何�
 `scripts/release.mjs` 按序执行：
 
 1. **门禁**：复跑与 GitHub CI 相同的 `npm run lint` → `npm test`（构建 + node:test 全量）→ 覆盖率报告；
-2. **版本递增**：按参数将 `package.json` 与 `package-lock.json` 版本号递增（semver）；
-3. **打包**：`npm pack` 产出 `docs/packages/dsh-interactive-shell-<version>.tgz`
-   （`prepack` 自动构建）；
-4. **git 发布**：要求工作区干净，提交全部改动、打注解 tag `vX.Y.Z`、
-   推送分支与 tag；
-5. **npm 发布**：`npm publish --access public`；
-6. **（可选）GitHub Release**：加 `--gh-release` 时调用 `gh` CLI 生成 Release。
-
-可选开关：
+2. **工作区洁净检查**：要求工作区干净，避免把无关改动卷进发布提交；
+3. **版本递增**：按参数将 `package.json` 与 `package-lock.json` 版本号递增（semver）；
+4. **打包**：`npm pack` 产出 `docs/packages/dsh-interactive-shell-<version>.tgz`
+   （`prepack` 自动构建；该目录已 gitignore，CI 会自行打包作为 Release 附件）；
+5. **git 发布**：提交、打注解 tag `vX.Y.Z`、推送分支与 tag → 触发 `publish.yml`；
+6. **（可选）本机 npm 发布 / GitHub Release**：见下表。
 
 | 开关 | 说明 |
 | --- | --- |
 | `--dry-run` | 只跑门禁与 `npm pack --dry-run` 清单预览，不修改任何文件 |
-| `--skip-publish` | 完成门禁、打包与 git 提交/tag/推送，跳过 `npm publish` |
-| `--skip-git` | 跳过 git 提交/tag/推送（版本号与 tag 自行处理），仅执行门禁、打包与发布 |
-| `--gh-release` | 发布成功后额外用 `gh` CLI 创建 GitHub Release（需安装并登录 [GitHub CLI](https://cli.github.com)） |
+| `--publish-locally` | 本机执行 `npm publish`（默认交给 CI；建议同时 `--skip-git`） |
+| `--skip-publish` | 历史开关，保留兼容：行为与默认一致（由 CI 发布） |
+| `--skip-git` | 跳过 git 提交/tag/推送（版本号与 tag 自行处理） |
+| `--gh-release` | 未推送 tag 时用 `gh` CLI 创建 GitHub Release（tag 已推送时由 CI 负责，自动跳过） |
+
+本机直接发布（不经 CI）时的认证二选一：设置环境变量 `NPM_TOKEN`
+（本机 `.npmrc` 已配置 `//registry.npmjs.org/:_authToken=${NPM_TOKEN}`），
+或执行 `npm login --registry https://registry.npmjs.org/`。
 
 ## 已知约束
 

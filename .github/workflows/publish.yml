@@ -1,0 +1,81 @@
+name: Publish to npm
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  id-token: write
+
+# One publish per tag: a second concurrent run must not race the same version.
+concurrency:
+  group: publish-npm
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    name: Build, Test & Publish to npm
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          # publishConfig.registry is pinned to the official registry; installs
+          # may still use a machine-local mirror.
+          registry-url: 'https://registry.npmjs.org/'
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Lint code
+        run: npm run lint
+
+      - name: Run test suite & coverage
+        run: |
+          npm test
+          node --experimental-test-coverage --test "test/*.test.mjs"
+
+      - name: Pack release tarball
+        # Release tarballs are no longer committed, so build the asset here
+        # (prepack rebuilds lib/).
+        run: |
+          mkdir -p docs/packages
+          npm pack --pack-destination docs/packages
+
+      - name: Check whether this version is already on npm
+        id: registry
+        env:
+          PKG_NAME: ${{ github.event.repository.name }}
+        run: |
+          version="$(node -p "require('./package.json').version")"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          if npm view "${PKG_NAME}@${version}" version > /dev/null 2>&1; then
+            echo "published=true" >> "$GITHUB_OUTPUT"
+            echo "${PKG_NAME}@${version} is already on the registry; skipping publish."
+          else
+            echo "published=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Publish to npm
+        if: steps.registry.outputs.published == 'false'
+        run: npm publish --access public
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        if: startsWith(github.ref, 'refs/tags/v')
+        with:
+          generate_release_notes: true
+          files: |
+            docs/packages/*.tgz
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

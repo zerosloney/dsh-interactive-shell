@@ -67,6 +67,14 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   强转，而是由 `requireAgent` 抛出明确的 owner 作用域错误。
 - **发布卫生**：补齐 MIT `LICENSE` 并纳入发布包；`docs/packages/*.tgz` 改为
   本地发布产物（`.gitignore`），不再随仓库入库。
+- **恢复 GitHub Actions 发布流水线**（`.github/workflows/publish.yml`，`v*` tag
+  推送触发，也可手动 dispatch）：门禁（lint + 单测 + 覆盖率）→ `npm pack`
+  → `npm publish --access public`（`NPM_TOKEN` secret）→ 创建 GitHub Release
+  并附 tarball；发布前 `npm view <pkg>@<version>` 判重（幂等）并用
+  `concurrency` 防止同一 tag 并发发包。`scripts/release.mjs` 相应改为默认
+  **不**在本机 `npm publish`（tag 推送后交给 CI），需要纯本机发布时用新增的
+  `--publish-locally`（建议配合 `--skip-git`）；`--skip-publish` 保留为兼容
+  开关，`--gh-release` 在 tag 已推送时自动跳过。
 
 - **发布流程改为本机执行，保留 GitHub CI**：保留 `.github/workflows/ci.yml`
   （lint + 单测 + 覆盖率门禁仍由 GitHub Actions 执行），删除发布流水线
