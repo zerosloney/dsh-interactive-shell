@@ -130,13 +130,20 @@ test('TraceSink: creates with defaults and rotates file when exceeding maxBytes'
 })
 
 test('TraceSink: 默认台账路径落在 harness home（$DSH_HOME，未设置时 ~/.dsh）', () => {
+  // 用 tmpdir 构造绝对路径：断言必须与运行平台无关（Windows / Linux / macOS）。
+  const home = join(tmpdir(), 'dsh-home')
   assert.equal(
-    defaultTracePath({ DSH_HOME: join('C:', 'dsh-home') }),
-    join('C:', 'dsh-home', 'interactive-shell', 'traces.jsonl'),
+    defaultTracePath({ DSH_HOME: home }),
+    join(home, 'interactive-shell', 'traces.jsonl'),
+  )
+  assert.equal(
+    defaultTracePath({ DSH_HOME: '~' }),
+    join(homedir(), 'interactive-shell', 'traces.jsonl'),
   )
   assert.equal(
     defaultTracePath({ DSH_HOME: '   ' }),
     join(homedir(), '.dsh', 'interactive-shell', 'traces.jsonl'),
+    '空白 DSH_HOME 视为未设置，不得落到当前工作目录',
   )
   assert.equal(
     defaultTracePath({}),
